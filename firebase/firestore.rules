@@ -8,8 +8,9 @@ service cloud.firestore {
   function isLegacyOwner(id){return hasEmail() && request.auth.token.email==id;}
   function uidProfileExists(){return isLoggedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));}
   function legacyProfileExists(){return hasEmail() && exists(/databases/$(database)/documents/users/$(request.auth.token.email));}
-  function isAdmin(){return isLoggedIn() && ((uidProfileExists() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role=='admin') || (legacyProfileExists() && get(/databases/$(database)/documents/users/$(request.auth.token.email)).data.role=='admin'));}
-  function isApprovedUser(){return isLoggedIn() && ((uidProfileExists() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['instructor','admin']) || (legacyProfileExists() && get(/databases/$(database)/documents/users/$(request.auth.token.email)).data.role in ['instructor','admin']));}
+  // Preserve established legacy role spelling while the portal stores normalized lowercase roles.
+  function isAdmin(){return isLoggedIn() && ((uidProfileExists() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin','Admin']) || (legacyProfileExists() && get(/databases/$(database)/documents/users/$(request.auth.token.email)).data.role in ['admin','Admin']));}
+  function isApprovedUser(){return isLoggedIn() && ((uidProfileExists() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['instructor','Instructor','admin','Admin']) || (legacyProfileExists() && get(/databases/$(database)/documents/users/$(request.auth.token.email)).data.role in ['instructor','Instructor','admin','Admin']));}
   function coachMatches(data,profile){return ('coachKey' in data && data.coachKey==profile.name.lower()) || ('اسم المدرب' in data && data['اسم المدرب']==profile.name);}
   function matchesCurrentCoach(data){return isLoggedIn() && ((uidProfileExists() && coachMatches(data,get(/databases/$(database)/documents/users/$(request.auth.uid)).data)) || (legacyProfileExists() && coachMatches(data,get(/databases/$(database)/documents/users/$(request.auth.token.email)).data)));}
   function hasFields(fields){return request.resource.data.keys().hasAll(fields);}
