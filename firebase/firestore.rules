@@ -15,6 +15,13 @@ service cloud.firestore {
   function matchesCurrentCoach(data){return isLoggedIn() && ((uidProfileExists() && coachMatches(data,get(/databases/$(database)/documents/users/$(request.auth.uid)).data)) || (legacyProfileExists() && coachMatches(data,get(/databases/$(database)/documents/users/$(request.auth.token.email)).data)));}
   function hasFields(fields){return request.resource.data.keys().hasAll(fields);}
   function onlyFields(fields){return request.resource.data.keys().hasOnly(fields);}
+  // Private device registration for free Web Push checkout reminders.
+  function validNotificationDevice(d){
+   return d.keys().hasOnly(['userId','token','platform','updatedAt'])
+    && d.userId is string && d.userId==request.auth.uid
+    && d.token is string && d.token.size()>0 && d.token.size()<=300
+    && d.platform=='web' && d.updatedAt==request.time;
+  }
 
   // Legacy collections: retained, except the self-approval and unverified-email holes.
   match /users/{userId}{
@@ -26,6 +33,15 @@ service cloud.firestore {
     && request.resource.data.email is string && request.resource.data.email==request.auth.token.email && request.resource.data.email.size()<=320
     && request.resource.data.role=='pending';
    allow update,delete: if isAdmin();
+  }
+  // FCM tokens are private; scheduled Apps Script uses project IAM, not these client rules.
+  match /notificationDevices/{deviceId}{
+   allow get: if isLoggedIn() && resource.data.userId==request.auth.uid;
+   allow create: if isLoggedIn() && validNotificationDevice(request.resource.data);
+   allow update: if isLoggedIn() && resource.data.userId==request.auth.uid
+    && request.resource.data.userId==resource.data.userId
+    && validNotificationDevice(request.resource.data);
+   allow delete: if isLoggedIn() && resource.data.userId==request.auth.uid;
   }
   match /attendance/{id}{
    allow read: if isLoggedIn() && (resource.data.userId==request.auth.uid||isAdmin());
