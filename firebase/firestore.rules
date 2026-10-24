@@ -59,8 +59,8 @@ service cloud.firestore {
    function role(r){return member() && me().role==r;}
    function child(sid){return role('parent') && sid in me().children;}
    function group(gid){return get(/databases/$(database)/documents/academyPortal/techware/groups/$(gid)).data;}
-   function teaches(gid){return admin() || (role('trainer') && group(gid).trainerId==request.auth.uid);}
-   function inGroup(gid){return admin() || (member() && (group(gid).trainerId==request.auth.uid || request.auth.uid in group(gid).studentIds || (me().role=='parent' && group(gid).studentIds.hasAny(me().children))));}
+   function teaches(gid){return admin() || (role('instructor') && group(gid).instructorId==request.auth.uid);}
+   function inGroup(gid){return admin() || (member() && (group(gid).instructorId==request.auth.uid || request.auth.uid in group(gid).studentIds || (me().role=='parent' && group(gid).studentIds.hasAny(me().children))));}
    function activeGroup(gid){return group(gid).archived==false;}
    function learner(sid){return admin() || (member() && (request.auth.uid==sid || child(sid)));}
    function text(v,max){return v is string && v.size()<=max;}
@@ -69,8 +69,8 @@ service cloud.firestore {
    function base(d,id,fields){return d.keys().hasOnly(fields.concat(['id','version','updatedAt'])) && d.id==id && key(id) && d.version is int && d.version>0 && d.updatedAt==request.time;}
    function next(){return request.resource.data.version==resource.data.version+1;}
    function initial(){return request.resource.data.version==1;}
-   function validUser(d,id){return base(d,id,['name','role','active','children','groupIds','age','completed','completedRoboticsLevels','color']) && text(d.name,100) && d.name.size()>0 && d.role in ['admin','trainer','student','parent'] && d.active is bool && ids(d.children,8) && (d.role=='parent'||d.children.size()==0) && ids(d.groupIds,30) && d.age is int && d.age>=0 && d.age<=100 && d.completed is list && d.completed.size()<=30 && d.completed.join('|').size()<=3000 && d.completedRoboticsLevels is int && d.completedRoboticsLevels>=0 && d.completedRoboticsLevels<=100 && d.color in ['blue','pink','green','orange','violet'];}
-   function validGroup(d,id){return base(d,id,['name','courseId','trainerId','studentIds','day','time','room','level','session','capacity','nextDate','archived']) && text(d.name,100) && d.name.size()>0 && key(d.courseId) && key(d.trainerId) && ids(d.studentIds,8) && d.studentIds.size()>0 && d.day in ['السبت','الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة'] && d.time.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$') && text(d.room,80) && d.level is int && d.level>=1 && d.level<=30 && d.session is int && d.session>=1 && d.session<=4 && d.capacity==8 && text(d.nextDate,10) && d.archived is bool;}
+   function validUser(d,id){return base(d,id,['name','role','active','children','groupIds','age','completed','completedRoboticsLevels','color']) && text(d.name,100) && d.name.size()>0 && d.role in ['admin','instructor','student','parent'] && d.active is bool && ids(d.children,8) && (d.role=='parent'||d.children.size()==0) && ids(d.groupIds,30) && d.age is int && d.age>=0 && d.age<=100 && d.completed is list && d.completed.size()<=30 && d.completed.join('|').size()<=3000 && d.completedRoboticsLevels is int && d.completedRoboticsLevels>=0 && d.completedRoboticsLevels<=100 && d.color in ['blue','pink','green','orange','violet'];}
+   function validGroup(d,id){return base(d,id,['name','courseId','instructorId','studentIds','day','time','room','level','session','capacity','nextDate','archived']) && text(d.name,100) && d.name.size()>0 && key(d.courseId) && key(d.instructorId) && ids(d.studentIds,8) && d.studentIds.size()>0 && d.day in ['السبت','الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة'] && d.time.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$') && text(d.room,80) && d.level is int && d.level>=1 && d.level<=30 && d.session is int && d.session>=1 && d.session<=4 && d.capacity==8 && text(d.nextDate,10) && d.archived is bool;}
    function validCourse(d,id){return base(d,id,['name','track','next','color','fee']) && text(d.name,100) && text(d.track,100) && text(d.next,160) && text(d.color,20) && (d.fee==null||(d.fee is number && d.fee>=0 && d.fee<100000));}
    function validSession(d,id){return base(d,id,['groupId','courseId','level','number','date','title','summary','taskText','published']) && key(d.groupId) && d.courseId==group(d.groupId).courseId && d.level is int && d.level>=1 && d.level<=30 && d.number is int && d.number>=1 && d.number<=4 && text(d.date,10) && text(d.title,150) && text(d.summary,6000) && text(d.taskText,6000) && d.published==true;}
    function validTask(d,id){return base(d,id,['groupId','sessionId','title','description','due','required']) && key(d.groupId) && key(d.sessionId) && getAfter(/databases/$(database)/documents/academyPortal/techware/sessions/$(d.sessionId)).data.groupId==d.groupId && text(d.title,150) && text(d.description,6000) && text(d.due,10) && d.required is bool;}
@@ -85,14 +85,14 @@ service cloud.firestore {
    function validRegistration(d,id){return base(d,id,['competitionId','studentId','status','createdAt']) && key(d.competitionId) && key(d.studentId) && id==d.competitionId+'_'+d.studentId && d.status in ['pending_parent','pending_admin','approved'] && text(d.createdAt,30);}
    function validAudit(d,id){return base(d,id,['actorId','action','groupId','createdAt']) && d.actorId==request.auth.uid && text(d.action,300) && text(d.groupId,160) && text(d.createdAt,30);}
    match /users/{uid}{
-    allow get: if isOwner(uid)||admin()||(member()&&((child(uid))||(role('trainer')&&resource.data.role=='student'&&me().groupIds.hasAny(resource.data.groupIds))||(resource.data.role=='trainer'&&me().groupIds.hasAny(resource.data.groupIds))));
+    allow get: if isOwner(uid)||admin()||(member()&&((child(uid))||(role('instructor')&&resource.data.role=='student'&&me().groupIds.hasAny(resource.data.groupIds))||(resource.data.role=='instructor'&&me().groupIds.hasAny(resource.data.groupIds))));
     allow list: if admin();
     allow create: if initial() && validUser(request.resource.data,uid) && (admin() || (isOwner(uid)&&(isPortalBootstrapAdmin()||isAdmin())&&request.resource.data.role=='admin'&&request.resource.data.active==true&&request.resource.data.children.size()==0&&request.resource.data.groupIds.size()==0));
     allow update: if admin() && next() && validUser(request.resource.data,uid) && (uid!=request.auth.uid || (request.resource.data.role=='admin'&&request.resource.data.active==true));
     allow delete: if false;
    }
    match /groups/{id}{
-    allow read: if admin()||(member()&&(resource.data.trainerId==request.auth.uid||request.auth.uid in resource.data.studentIds||(role('parent')&&resource.data.studentIds.hasAny(me().children))));
+    allow read: if admin()||(member()&&(resource.data.instructorId==request.auth.uid||request.auth.uid in resource.data.studentIds||(role('parent')&&resource.data.studentIds.hasAny(me().children))));
     allow create: if admin()&&initial()&&validGroup(request.resource.data,id);
     allow update: if admin()&&next()&&validGroup(request.resource.data,id);
    }
