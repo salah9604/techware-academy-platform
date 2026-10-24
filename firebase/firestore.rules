@@ -56,6 +56,9 @@ service cloud.firestore {
    function admin(){return member() && me().role=='admin';}
   // First portal administrator: only the verified Techware academy account may bootstrap itself.
   function isPortalBootstrapAdmin(){return isLoggedIn() && request.auth.token.get('email_verified',false)==true && request.auth.token.get('email','')=='techwareacademy@gmail.com';}
+   // Existing instructors may create only their own empty portal profile on first login.
+   // Their authority comes exclusively from the old protected /users collection.
+   function isLegacyInstructor(){return isLoggedIn() && ((uidProfileExists() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['instructor','Instructor']) || (legacyProfileExists() && get(/databases/$(database)/documents/users/$(request.auth.token.email)).data.role in ['instructor','Instructor']));}
    function role(r){return member() && me().role==r;}
    function child(sid){return role('parent') && sid in me().children;}
    function group(gid){return get(/databases/$(database)/documents/academyPortal/techware/groups/$(gid)).data;}
@@ -87,7 +90,7 @@ service cloud.firestore {
    match /users/{uid}{
     allow get: if isOwner(uid)||admin()||(member()&&((child(uid))||(role('instructor')&&resource.data.role=='student'&&me().groupIds.hasAny(resource.data.groupIds))||(resource.data.role=='instructor'&&me().groupIds.hasAny(resource.data.groupIds))));
     allow list: if admin();
-    allow create: if initial() && validUser(request.resource.data,uid) && (admin() || (isOwner(uid)&&(isPortalBootstrapAdmin()||isAdmin())&&request.resource.data.role=='admin'&&request.resource.data.active==true&&request.resource.data.children.size()==0&&request.resource.data.groupIds.size()==0));
+    allow create: if initial() && validUser(request.resource.data,uid) && (admin() || (isOwner(uid)&&(isPortalBootstrapAdmin()||isAdmin())&&request.resource.data.role=='admin'&&request.resource.data.active==true&&request.resource.data.children.size()==0&&request.resource.data.groupIds.size()==0) || (isOwner(uid)&&isLegacyInstructor()&&request.resource.data.role=='instructor'&&request.resource.data.active==true&&request.resource.data.children.size()==0&&request.resource.data.groupIds.size()==0));
     allow update: if admin() && next() && validUser(request.resource.data,uid) && (uid!=request.auth.uid || (request.resource.data.role=='admin'&&request.resource.data.active==true));
     allow delete: if false;
    }
