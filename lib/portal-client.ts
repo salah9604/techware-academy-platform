@@ -10,6 +10,9 @@ export const emptyPortal=():State=>({users:[],courses:[],groups:[],sessions:[],t
 export const portalError=(e:unknown)=>{const code=(e as {code?:string})?.code;return code==='permission-denied'?'الصلاحيات رفضت العملية. تأكد من نشر القواعد وربط حسابك، أو حدّث الصفحة لو البيانات اتغيرت.':code==='resource-exhausted'?'وصلنا لحد الاستخدام المتاح. جرّب لاحقًا وراجع الاستخدام في Firebase.':e instanceof Error?e.message:'تعذّر الاتصال بقاعدة البيانات';};
 export async function profileFor(uid:string){const d=await getDoc(ref('users',uid));return d.exists()?d.data() as Row:null;}
 export async function bootstrapAdmin(uid:string,name:string){await setDoc(ref('users',uid),{id:uid,name:name.trim().slice(0,100)||'إدارة Techware',role:'admin',active:true,children:[],groupIds:[],age:0,completed:[],completedRoboticsLevels:0,color:'blue',version:1,updatedAt:serverTimestamp()});}
+// A legacy instructor can activate only their own portal profile. Firestore rules
+// verify the old /users role before allowing this write; no new account is approved.
+export async function activateLegacyInstructor(uid:string,name:string){await setDoc(ref('users',uid),{id:uid,name:name.trim().slice(0,100)||'مدرب Techware',role:'instructor',active:true,children:[],groupIds:[],age:0,completed:[],completedRoboticsLevels:0,color:'blue',version:1,updatedAt:serverTimestamp()});}
 function plain(d:Row):Row {const r={...d};for(const k of ['updatedAt','reviewedAtTs'])if(r[k]?.toDate)r[k]=r[k].toDate().toISOString();if(r.fileIds)r.files=r.fileIds.map((id:string)=>({id,name:'صورة التاسك'}));return r;}
 // Realtime queries are constrained by the same group/child ACLs as the rules.
 // A bounded pilot: never silently show partial statistics above the bound.
