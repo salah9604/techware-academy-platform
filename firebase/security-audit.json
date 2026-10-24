@@ -1,0 +1,12 @@
+{
+  "score": 3,
+  "summary": "Merged rules reviewed and tested locally. The portal uses UID roles, group/child ACLs, bounded schemas, server review timestamps and optimistic versions. Critical self-enrollment and unverified-email holes are closed. Legacy compatibility limitations remain; this is not a certification of the deployed project.",
+  "findings": [
+    {"check":"Authority Source","severity":"critical","issue":"FIXED: original self-created profiles could choose instructor and read approved-user data. New self-enrollment only permits pending. Previously created instructors remain trusted.","recommendation":"Update the legacy registration form and review previously self-enrolled staff."},
+    {"check":"Authority Source","severity":"critical","issue":"FIXED: legacy email-key authority now requires email_verified.","recommendation":"Verify legacy admin email addresses and migrate privileged profiles to UID keys."},
+    {"check":"Business Logic vs. Rules","severity":"moderate","issue":"Legacy assessments still authorize by coach name/coachKey; approved legacy staff still read all legacy students/Schedules. Preserved because legacy schema/migration code was not supplied.","recommendation":"Migrate legacy records to coach UID and group ACLs before assuming equivalent isolation across both systems."},
+    {"check":"The Update Bypass","severity":"moderate","issue":"Legacy assessments and several admin write rules retain permissive field validation. Portal collections have strict bounded validators and version checks.","recommendation":"Audit real legacy fields and migrate create/update validation together."},
+    {"check":"Storage Abuse","severity":"minor","issue":"Authorized users can still consume the shared free quota. Images use small Firestore documents; cleanup requires an admin browser to open.","recommendation":"Pilot on a small dataset, watch quotas, exempt image payloads from indexing, and add pagination plus an appropriate image store before scaling."},
+    {"check":"Audit Completeness","severity":"minor","issue":"Activity entries are client-written append-only records, not a complete server-owned audit trail.","recommendation":"Add server-owned auditing if compliance-grade event history becomes required."}
+  ]
+}
