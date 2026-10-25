@@ -1,0 +1,58 @@
+name: Deploy Techware Firestore Rules
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_project:
+        description: 'Type techware-instructor to confirm the Firebase project'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: techware-firestore-rules-production
+  cancel-in-progress: false
+
+jobs:
+  deploy-rules:
+    name: Publish Firestore rules only
+    if: ${{ github.ref == 'refs/heads/main' && inputs.confirm_project == 'techware-instructor' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check identity configuration
+        env:
+          WIF_PROVIDER: ${{ vars.FIREBASE_WIF_PROVIDER }}
+          DEPLOY_SERVICE_ACCOUNT: ${{ vars.FIREBASE_DEPLOY_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$WIF_PROVIDER" ] || [ -z "$DEPLOY_SERVICE_ACCOUNT" ]; then
+            echo "::error::Configure FIREBASE_WIF_PROVIDER and FIREBASE_DEPLOY_SERVICE_ACCOUNT repository variables first."
+            exit 1
+          fi
+          test -f firebase/firestore.rules
+          test -f firebase.portal.json
+
+      - name: Authenticate to Google Cloud (keyless)
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: techware-instructor
+          workload_identity_provider: ${{ vars.FIREBASE_WIF_PROVIDER }}
+          service_account: ${{ vars.FIREBASE_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Firebase CLI
+        run: npm install --global firebase-tools@latest
+
+      - name: Deploy only Firestore security rules
+        run: firebase deploy --only firestore:rules --config firebase.portal.json --project techware-instructor --non-interactive
