@@ -26,7 +26,9 @@ service cloud.firestore {
   // Legacy collections: retained, except the self-approval and unverified-email holes.
   match /users/{userId}{
    allow get: if isOwner(userId)||isLegacyOwner(userId)||isAdmin();
-   allow list: if isAdmin();
+   // Supports matching a verified Google email to legacy instructor documents.
+   // Queries remain limited by the user's own verified email.
+   allow list: if isAdmin() || (hasEmail() && resource.data.email==request.auth.token.email);
    allow create: if isOwner(userId) && hasFields(['uid','name','email','role']) && onlyFields(['uid','name','email','role'])
     && request.resource.data.uid==request.auth.uid && request.resource.data.uid==userId
     && request.resource.data.name is string && request.resource.data.name.size()>0 && request.resource.data.name.size()<=100
