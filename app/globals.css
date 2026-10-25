@@ -10,3 +10,30 @@
 small,.tiny{color:#728198}.sidebar nav button{font-size:13px}.page-heading p{color:#748198;font-size:12px}.hero p{color:#63789f;font-size:12px}.hero-note{color:#63789f;font-size:10px}.stat-top{color:#68788f;font-size:11px}.stat-card small{color:#7d8b9e;font-size:10px}.group-card>p{color:#75869f;font-size:10px}.group-course small{color:#72839c;font-size:10px}.group-progress{font-size:10px;color:#6a7e9d}.group-foot{color:#6b7f9c}.group-foot .open-link{color:#657da5}.lesson-card summary small{color:#7a8da8;font-size:10px}.lesson-card summary h3{font-size:14px}.lesson-content>p,.task-card>p{color:#647b9c;font-size:13px}.note p{color:#637c9f}.event-card p{color:#8c7757;font-size:11px}.event-card small{color:#9a815b}.schedule-row small{color:#7b8aa2;font-size:10px}.bubble p{font-size:13px}.body-copy{color:#687f9e}.field>span{color:#60789a}.conversation p{color:#7c8da7}.notification p{color:#778caa}.integration-card p{color:#6a81a3}.competition-body p{color:#6c83a3}.check-option{color:#6983a7}.breadcrumb{color:#78879e}.save-state{color:#70839c}
 @media(max-width:520px){.sidebar nav button{font-size:13px}.stat-card small{font-size:9px}.hero p{font-size:11px}.hero-note{font-size:9px}.group-card>p{font-size:12px}.group-course small{font-size:11px}.group-progress{font-size:11px}.group-foot{font-size:11px}.lesson-content>p,.task-card>p,.bubble p{font-size:13px}.lesson-card summary h3{font-size:13px}.preview-bar>span{font-size:9px}.role-switch button{font-size:10px}.page-heading p{font-size:12px}.field{font-size:12px}.field input,.field select,.field textarea{font-size:13px}.field textarea{min-height:100px}.btn{font-size:12px}.group-admin-actions button{font-size:11px}}
 .auth-page{min-height:100vh;display:grid;place-items:center;padding:32px 20px;background:radial-gradient(ellipse at top right,#dceafa,transparent 65%),#f4f7fb}.auth-card{width:100%;max-width:500px;background:#fff;border:1px solid #e1e7ef;border-radius:24px;padding:36px;box-shadow:0 20px 60px #14234b0c;display:grid;gap:18px}.auth-card h1{font-size:29px;color:#0c174d}.auth-card form{display:grid;gap:18px}.auth-brand{font-size:25px;font-weight:900;color:#0c174d;letter-spacing:2px}.auth-brand small{display:block;font-size:11px;letter-spacing:5px}.auth-card .btn{justify-content:center}.auth-card hr{border:0;border-top:1px solid #e1e7ef}.auth-error{color:#9d2336;background:#fff0f2;padding:12px;border-radius:10px}.auth-uid{overflow-wrap:anywhere;white-space:normal;background:#f3f5fa;padding:12px;border-radius:8px}.auth-card .feedback{line-height:1.8}
+
+
+/* Student-facing sign-in and activation screens */
+.auth-page{direction:rtl}
+.auth-heading{display:grid;gap:10px}
+.auth-heading .eyebrow{font-family:inherit;font-size:12px;letter-spacing:0;font-weight:700;margin:0}
+.auth-intro{color:#6b7891;font-size:13px;line-height:1.9}
+.auth-full{width:100%;min-height:44px;font-size:13px}
+.auth-google{background:#fff;border-color:#d8dfeb;font-weight:750}
+.auth-google:hover{border-color:#aebcdb;background:#f9fbff}
+.auth-reset{justify-self:start;border:0;background:transparent;color:#4669d8;padding:0;font-size:12px;font-weight:700}
+.auth-divider{display:flex;align-items:center;gap:13px;color:#8893a7;font-size:12px}
+.auth-divider:before,.auth-divider:after{content:'';flex:1;height:1px;background:#e4e9f2}
+.auth-help{padding:13px 14px;background:#f5f8fe;border:1px solid #e9edf8;border-radius:10px;color:#65748f;font-size:12px;line-height:1.9}
+.auth-notice{color:#176547;background:#eaf7f1;border:1px solid #c6ead8;border-radius:10px;padding:12px;font-size:12px}
+.auth-footer{border-top:1px solid #e9edf4;padding-top:14px;color:#8993a7;text-align:center;font-size:11px}
+.auth-uid{display:block;text-align:left;direction:ltr;user-select:all;font-size:12px}
+.auth-admin-setup{border-top:1px solid #e9edf4;padding-top:14px}
+.auth-admin-setup summary{color:#566781;font-size:12px;cursor:pointer}
+.auth-admin-setup p{font-size:12px;color:#6a7992;margin-block:8px}
+@media(max-width:540px){
+ .auth-page{padding:20px 13px;align-items:center}
+ .auth-card{border-radius:18px;padding:25px 20px;gap:14px}
+ .auth-card h1{font-size:24px}
+ .auth-card form{gap:13px}
+ .auth-brand{font-size:23px}
+}
