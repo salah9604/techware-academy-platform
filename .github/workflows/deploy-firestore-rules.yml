@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   deploy-rules:
-    name: Publish Firestore rules only
+    name: Back up and publish Firestore rules only
     if: ${{ github.ref == 'refs/heads/main' && inputs.confirm_project == 'techware-instructor' }}
     runs-on: ubuntu-latest
     permissions:
@@ -39,6 +39,32 @@ jobs:
           project_id: techware-instructor
           workload_identity_provider: projects/257053522854/locations/global/workloadIdentityPools/techware-gha/providers/github-main
           service_account: techware-rules-deployer@techware-instructor.iam.gserviceaccount.com
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Back up currently deployed Firestore rules
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="$(gcloud auth print-access-token)"
+          base="https://firebaserules.googleapis.com/v1"
+          curl --fail-with-body --silent --show-error --header "Authorization: Bearer ${token}" \
+            "${base}/projects/techware-instructor/releases/cloud.firestore" > firestore-active-release.json
+          ruleset_name="$(jq -er '.rulesetName' firestore-active-release.json)"
+          curl --fail-with-body --silent --show-error --header "Authorization: Bearer ${token}" \
+            "${base}/${ruleset_name}" > firestore-active-ruleset.json
+          test -s firestore-active-ruleset.json
+
+      - name: Store previous Firestore rules for rollback
+        uses: actions/upload-artifact@v4
+        with:
+          name: firestore-rules-before-deploy
+          path: |
+            firestore-active-release.json
+            firestore-active-ruleset.json
+          retention-days: 30
+          if-no-files-found: error
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
