@@ -28,8 +28,25 @@ function cachedList(uid:string):SavedList|null{
 function monthCutoff(){const d=new Date();const day=d.getDate();d.setDate(1);d.setMonth(d.getMonth()-3);d.setDate(Math.min(day,new Date(d.getFullYear(),d.getMonth()+1,0).getDate()));d.setHours(0,0,0,0);return d;}
 function dateOf(text:string):Date|null{
  if(!text)return null;
+ // The actual Techware form stores "7:54:27 م 2026/08/03".
+ // Keep the time, including Arabic AM/PM, so same-day registrations sort correctly.
  const ymd=text.match(/(20\d\d)[\/-](\d{1,2})[\/-](\d{1,2})/);
- const d=ymd?new Date(+ymd[1],+ymd[2]-1,+ymd[3]):new Date(text);
+ if(ymd){
+  const year=+ymd[1],month=+ymd[2],day=+ymd[3];
+  const pre=text.slice(0,ymd.index);
+  const post=text.slice((ymd.index||0)+ymd[0].length);
+  const time=pre.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(ص|م|AM|PM)?/i)
+    ||post.match(/(?:T|\s)(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(ص|م|AM|PM)?/i);
+  let hour=time?+time[1]:0;
+  const marker=time?.[4]?.toLowerCase();
+  if(marker==='م'||marker==='pm')hour=hour%12+12;
+  if(marker==='ص'||marker==='am')hour=hour%12;
+  const minute=time?+time[2]:0,second=time?+(time[3]||0):0;
+  const d=new Date(year,month-1,day,hour,minute,second);
+  if(d.getFullYear()!==year||d.getMonth()!==month-1||d.getDate()!==day||hour>23||minute>59||second>59)return null;
+  return d;
+ }
+ const d=new Date(text);
  return Number.isFinite(d.getTime())?d:null;
 }
 function prettyDate(value:string|null){const date=value?dateOf(value):null;return date?new Intl.DateTimeFormat('ar-EG',{year:'numeric',month:'short',day:'numeric'}).format(date):'غير مسجّل';}
@@ -94,11 +111,18 @@ export default function WaitingListApp(){
   const d=dateOf(e.date);
   return !d?'undated':d<cutoff?'expired':'waiting';
  };
- const waiting=data.entries.filter(e=>classify(e)==='waiting');
+ // Both recent and complete lists use newest submission first, including time of day.
+ // Source-row order breaks identical-time ties deterministically (newer rows first).
+ const sortedEntries=data.entries.map((entry,index)=>({entry,index})).sort((a,b)=>{
+  const at=dateOf(a.entry.date)?.getTime()??Number.NEGATIVE_INFINITY;
+  const bt=dateOf(b.entry.date)?.getTime()??Number.NEGATIVE_INFINITY;
+  return bt-at||b.index-a.index;
+ }).map(item=>item.entry);
+ const waiting=sortedEntries.filter(e=>classify(e)==='waiting');
  const attended=data.entries.filter(e=>classify(e)==='attended').length;
  const expired=data.entries.filter(e=>classify(e)==='expired').length;
  const courses=[...new Set(data.entries.map(e=>e.course))].sort((a,b)=>a.localeCompare(b,'ar'));
- const filtered=(tab==='recent'?waiting:data.entries).filter(e=>{
+ const filtered=(tab==='recent'?waiting:sortedEntries).filter(e=>{
   const hay=[e.name,e.phone,e.whatsapp,e.course,e.school].join(' ').toLowerCase();
   return (!query.trim()||hay.includes(query.trim().toLowerCase()))&&(course==='all'||e.course===course)&&(status==='all'||classify(e)===status);
  });
