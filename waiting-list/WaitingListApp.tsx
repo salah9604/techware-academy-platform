@@ -1,7 +1,7 @@
 'use client';
 import {useEffect,useMemo,useState,type FormEvent} from 'react';
 import {GoogleAuthProvider,browserLocalPersistence,onAuthStateChanged,setPersistence,signInWithEmailAndPassword,signInWithPopup,signOut,reauthenticateWithPopup,linkWithPopup,type User} from 'firebase/auth';
-import {collection,doc,documentId,getDoc,getDocs,getFirestore,limit,onSnapshot,orderBy,query,serverTimestamp,setDoc,startAfter,type DocumentData,type QueryDocumentSnapshot} from 'firebase/firestore';
+import {collection,doc,documentId,getDoc,getDocs,getFirestore,limit,orderBy,query,serverTimestamp,setDoc,startAfter,type DocumentData,type QueryDocumentSnapshot} from 'firebase/firestore';
 import {firebaseAuth} from './firebase-client';
 import './waiting-list.css';
 
@@ -109,6 +109,7 @@ export default function WaitingListApp(){
  const [now,setNow]=useState(new Date()),[reload,setReload]=useState(0);
  const [email,setEmail]=useState(''),[staffUid,setStaffUid]=useState(''),[staffName,setStaffName]=useState('');
  const [staffRows,setStaffRows]=useState<{id:string;name:string;active:boolean}[]>([]);const [staffError,setStaffError]=useState('');
+ const [staffOpened,setStaffOpened]=useState(false);
  const [sheetToken,setSheetToken]=useState('');
  const [lastFetchAt,setLastFetchAt]=useState(0);
  const [dataReady,setDataReady]=useState(false);
@@ -124,13 +125,17 @@ export default function WaitingListApp(){
   if(!user){setRole('checking');return;}
   let cancelled=false;setRole('checking');setError('');
   (async()=>{
-   const [portal,legacy,staff]=await Promise.all([
-    getDoc(doc(db,'academyPortal/techware/users',user.uid)).catch(()=>null),
-    getDoc(doc(db,'users',user.uid)).catch(()=>null),
-    getDoc(doc(db,waitRoot+'/staff',user.uid)).catch(()=>null)
-   ]);
-   const isAdmin=!!((portal?.exists()&&portal.data().active===true&&portal.data().role==='admin')||(legacy?.exists()&&['admin','Admin'].includes(legacy.data().role)));
-   const isStaff=!!(staff?.exists()&&staff.data().active===true);
+   const legacy=await getDoc(doc(db,'users',user.uid)).catch(()=>null);
+   let isAdmin=!!(legacy?.exists()&&['admin','Admin'].includes(legacy.data().role));
+   if(!isAdmin){
+    const portal=await getDoc(doc(db,'academyPortal/techware/users',user.uid)).catch(()=>null);
+    isAdmin=!!(portal?.exists()&&portal.data().active===true&&portal.data().role==='admin');
+   }
+   let isStaff=false;
+   if(!isAdmin){
+    const staff=await getDoc(doc(db,waitRoot+'/staff',user.uid)).catch(()=>null);
+    isStaff=!!(staff?.exists()&&staff.data().active===true);
+   }
    if(!cancelled)setRole(isAdmin?'admin':isStaff?'staff':'denied');
   })().catch(e=>{if(!cancelled){setError(readable(e));setRole('denied');}});
   return()=>{cancelled=true;};
@@ -175,9 +180,13 @@ export default function WaitingListApp(){
   return()=>{cancelled=true;};
  },[user?.uid,role,sheetToken,reload]);
  useEffect(()=>{
-  if(role!=='admin')return;
-  return onSnapshot(collection(db,waitRoot+'/staff'),snap=>setStaffRows(snap.docs.map(d=>({id:d.id,name:String(d.data().name||''),active:d.data().active===true}))),e=>setStaffError('إضافة السكرتارية من هنا محتاجة تفعيل قواعد Firebase الخاصة بالنظام.'));
- },[role,db]);
+  if(role!=='admin'||!staffOpened)return;
+  let active=true;
+  getDocs(collection(db,waitRoot+'/staff'))
+   .then(snap=>{if(active)setStaffRows(snap.docs.map(d=>({id:d.id,name:String(d.data().name||''),active:d.data().active===true})));})
+   .catch(()=>{if(active)setStaffError('إضافة السكرتارية من هنا محتاجة تفعيل قواعد Firebase الخاصة بالنظام.');});
+  return()=>{active=false;};
+ },[role,staffOpened,db]);
 
  const threshold=cutoff(now);
  const classify=(e:Entry)=>{const d=decisions[e.key];return d?.status==='attended'?'attended':d?.status==='removed'?'removed':!e.date?'undated':e.date<threshold?'expired':'waiting';};
@@ -271,22 +280,22 @@ export default function WaitingListApp(){
  }
  async function saveStaff(e:FormEvent<HTMLFormElement>){e.preventDefault();if(!user||role!=='admin')return;
   const uid=staffUid.trim();if(!/^[A-Za-z0-9_-]{8,160}$/.test(uid)){setError('اكتب Firebase UID صحيح للموظف.');return;}
-  setBusy('staff');setError('');try{await setDoc(doc(db,waitRoot+'/staff',uid),{name:staffName.trim().slice(0,100)||'سكرتارية',active:true,updatedAt:serverTimestamp(),createdBy:user.uid});setStaffName('');setStaffUid('');setNotice('تم تفعيل حساب السكرتارية.');}catch(err){setError(readable(err));}finally{setBusy('');}
+  setBusy('staff');setError('');try{const name=staffName.trim().slice(0,100)||'سكرتارية';await setDoc(doc(db,waitRoot+'/staff',uid),{name,active:true,updatedAt:serverTimestamp(),createdBy:user.uid});setStaffRows(prev=>[...prev.filter(item=>item.id!==uid),{id:uid,name,active:true}]);setStaffName('');setStaffUid('');setNotice('تم تفعيل حساب السكرتارية.');}catch(err){setError(readable(err));}finally{setBusy('');}
  }
- async function toggleStaff(row:{id:string;name:string;active:boolean}){if(!user||role!=='admin')return;setBusy(row.id);setError('');try{await setDoc(doc(db,waitRoot+'/staff',row.id),{name:row.name,active:!row.active,updatedAt:serverTimestamp(),createdBy:user.uid});}catch(err){setError(readable(err));}finally{setBusy('');}}
+ async function toggleStaff(row:{id:string;name:string;active:boolean}){if(!user||role!=='admin')return;setBusy(row.id);setError('');try{await setDoc(doc(db,waitRoot+'/staff',row.id),{name:row.name,active:!row.active,updatedAt:serverTimestamp(),createdBy:user.uid});setStaffRows(prev=>prev.map(item=>item.id===row.id?{...item,active:!row.active}:item));}catch(err){setError(readable(err));}finally{setBusy('');}}
  const badges:Record<string,string>={waiting:'في الانتظار',attended:'حضر',removed:'تم الحذف',expired:'انتهت 3 شهور',undated:'تاريخ غير معروف'};
  return <main className="wl-page" dir="rtl">
   <header className="wl-header"><div className="wl-brand"><span className="wl-symbol">T</span><div><strong>TECHWARE <span>ACADEMY</span></strong><small>Waiting List Management</small></div></div><div className="wl-header-actions">{user&&<><span className="wl-user">{user.displayName||user.email}</span><button className="wl-out" onClick={logout}>خروج</button></>}</div></header>
   {!authReady?<section className="wl-center"><div className="wl-loader"/><p>جاري تجهيز الصفحة</p></section>:!user?<section className="wl-auth"><span className="wl-auth-icon">T</span><h1>قائمة انتظار Techware</h1><p>لوحة خاصة بالسكرتارية والإدارة لمتابعة طلبات التسجيل.</p><form onSubmit={loginWithEmail}><label>البريد الإلكتروني<input type="email" dir="ltr" value={email} onChange={e=>setEmail(e.target.value)} placeholder="name@example.com" required/></label><label>كلمة المرور<input type="password" name="password" dir="ltr" placeholder="كلمة المرور" required/></label><button type="submit" className="wl-primary" disabled={!!busy}>تسجيل الدخول</button></form><div className="wl-or">أو</div><button className="wl-google" type="button" onClick={loginWithGoogle} disabled={!!busy}>المتابعة باستخدام Google</button></section>:role==='checking'?<section className="wl-center"><div className="wl-loader"/><p>التحقق من صلاحيات الحساب...</p></section>:role==='denied'?<section className="wl-auth"><h1>الحساب غير مصرح له بالدخول</h1><p>اطلب من الإدارة تفعيل حسابك كموظف سكرتارية.</p><code dir="ltr" className="wl-uid">{user.uid}</code><button className="wl-google" onClick={()=>navigator.clipboard.writeText(user.uid).then(()=>setNotice('تم نسخ UID'))}>نسخ رقم الحساب</button></section>:<div className="wl-content">
    <section className="wl-heading"><div><span className="wl-overline">لوحة السكرتارية</span><h1>إدارة قائمة الانتظار</h1><p>متابعة طلبات التسجيل والحضور من مكان واحد</p></div><button className="wl-refresh" onClick={refreshData} disabled={loading||!sheetToken}>↻ تحديث البيانات</button></section>
-   <section className="wl-connect-panel"><div><strong>{dataReady?'متصل باستمارات Techware':'ربط ملف تسجيلات Techware'}</strong><p>{dataReady?'البيانات بتتقرأ من تبويب waiting list في ملف الأكاديمية.':'استخدم حساب Google المصرّح له بالوصول لملف تسجيلات Techware.'}</p><details className="wl-connect-help"><summary>إعدادات الاتصال لو ظهر خطأ 403</summary><p>قد يحتاج مشروع Firebase لتفعيل Google Sheets API مرة واحدة. ده لا يفتح الملف للعامة.</p><a href={sheetsApiSetupUrl} target="_blank" rel="noopener noreferrer">فتح إعدادات Google Sheets API</a></details></div><button className="wl-primary" type="button" onClick={connectSheet} disabled={!!busy}>{busy==='connect'?'جاري الربط...':sheetToken?'إعادة ربط الحساب':'ربط استمارات Google'}</button></section>
+   <section className="wl-connect-panel"><div><strong>{dataReady?'متصل باستمارات Techware':'ربط ملف تسجيلات Techware'}</strong><p>{dataReady?'البيانات بتتقرأ من تبويب waiting list في ملف الأكاديمية.':'استخدم حساب Google المصرّح له بالوصول لملف تسجيلات Techware.'}</p><details className="wl-connect-help"><summary>إعدادات الاتصال لو ظهر خطأ 403</summary><p>قد يحتاج مشروع Firebase لتفعيل Google Sheets API مرة واحدة. ده لا يفتح الملف للعامة.</p><a href={sheetsApiSetupUrl} target="_blank" rel="noopener noreferrer">فتح إعدادات Google Sheets API</a></details></div>{sheetToken?<span className="wl-connected" role="status">✓ حساب Google متصل</span>:<button className="wl-primary" type="button" onClick={connectSheet} disabled={!!busy}>{busy==='connect'?'جاري الربط...':'ربط استمارات Google'}</button>}</section>
    <section className="wl-stats"><div><span>في الانتظار</span><strong>{dataReady?counts.waiting:'—'}</strong><small>آخر 3 شهور</small></div><div><span>حضروا</span><strong>{dataReady?counts.attended:'—'}</strong><small>تم تأكيد حضورهم</small></div><div><span>انتهت المدة</span><strong>{dataReady?counts.expired:'—'}</strong><small>مستبعدون تلقائيًا</small></div><div><span>إجمالي الاستمارات</span><strong>{dataReady?counts.total:'—'}</strong><small>السجل الكامل</small></div></section>
    <section className="wl-panel"><div className="wl-tabs"><button className={tab==='recent'?'selected':''} onClick={()=>{setTab('recent');setStatus('all');}}>قائمة آخر 3 شهور <b>{dataReady?counts.waiting:'—'}</b></button><button className={tab==='all'?'selected':''} onClick={()=>setTab('all')}>القائمة الكاملة <b>{dataReady?counts.total:'—'}</b></button></div>
     <div className="wl-filters"><input aria-label="البحث" value={search} onChange={e=>setSearch(e.target.value)} placeholder="ابحث باسم الطالب أو رقم ولي الأمر..." /><select aria-label="الكورس" value={course} onChange={e=>setCourse(e.target.value)}><option value="all">كل الكورسات</option>{courses.map(c=><option key={c}>{c}</option>)}</select>{tab==='all'&&<select aria-label="الحالة" value={status} onChange={e=>setStatus(e.target.value)}><option value="all">كل الحالات</option>{Object.entries(badges).map(([k,v])=><option value={k} key={k}>{v}</option>)}</select>}</div>
     {!dataReady?<div className="wl-state"><strong>اربط الاستمارات لعرض بيانات الطلاب</strong><p>اضغط «ربط استمارات Google» واختر الحساب اللي عنده صلاحية على الملف.</p></div>:loading?<div className="wl-state"><div className="wl-loader"/><p>تحميل الاستمارات...</p></div>:filtered.length===0?<div className="wl-state"><strong>لا توجد طلبات مطابقة</strong><p>{counts.total===0?'لم تُعرض استمارات بعد. راجع اتصال قاعدة البيانات ومصدر التسجيل.':'جرّب تغيير البحث أو الفلاتر.'}</p></div>:<div className="wl-list">{filtered.map(e=>{const state=classify(e),w=e.whatsapp||e.phone;return <article className="wl-entry" key={e.key}><div className="wl-entry-main"><div className="wl-avatar">{e.name.charAt(0)}</div><div><div className="wl-name">{e.name}<span className={'wl-badge '+state}>{badges[state]}</span></div><div className="wl-meta"><span>{e.course}</span>{e.age&&<span>العمر: {e.age}</span>}<span>تسجيل: {format(e.date)}</span></div></div></div><div className="wl-info"><span dir="ltr">{e.phone||'لا يوجد رقم'}</span>{w&&<a href={'https://wa.me/'+(canonical(w).replace(/^0/,'20'))} target="_blank" rel="noreferrer">واتساب</a>}{e.school&&<span>{e.school}</span>}{e.notes&&<details><summary>ملاحظات</summary><p>{e.notes}</p></details>}</div><div className="wl-actions">{state==='waiting'?<><button className="wl-attend" disabled={!!busy} onClick={()=>mark(e,'attended')}>تسجيل حضور</button><button className="wl-remove" disabled={!!busy} onClick={()=>mark(e,'removed')}>حذف من الانتظار</button></>:<button className="wl-restore" disabled={!!busy||state==='expired'} onClick={()=>mark(e,'waiting')}>{state==='expired'?'انتهت صلاحية الطلب':'إرجاع للانتظار'}</button>}</div></article>})}</div>}
-    <footer className="wl-footer"><span>{dataReady?filtered.length:'—'} طلب ظاهر</span><span>{lastSync?'آخر تحديث: '+format(lastSync):'—'}</span></footer>
+    <footer className="wl-footer"><span>{dataReady?filtered.length:'—'} طلب ظاهر</span><span>{lastSync?'آخر مزامنة: '+new Intl.DateTimeFormat('ar-EG',{hour:'2-digit',minute:'2-digit'}).format(lastSync):'—'}</span></footer>
    </section>
-   {role==='admin'&&<details className="wl-staff"><summary>إدارة حسابات السكرتارية</summary><div className="wl-staff-body"><p>الموظف يسجّل دخول بحسابه، ويرسل UID الظاهر له لتفعيل الصلاحية.</p><form onSubmit={saveStaff}><input dir="ltr" value={staffUid} onChange={e=>setStaffUid(e.target.value)} placeholder="Firebase UID" required/><input value={staffName} onChange={e=>setStaffName(e.target.value)} placeholder="اسم الموظف"/><button type="submit" className="wl-primary" disabled={!!busy}>تفعيل الموظف</button></form>{staffRows.map(row=><div key={row.id} className="wl-staff-row"><span>{row.name} <small dir="ltr">{row.id}</small></span><button onClick={()=>toggleStaff(row)} disabled={!!busy}>{row.active?'إيقاف الصلاحية':'تفعيل الصلاحية'}</button></div>)}{staffError&&<p role="status">{staffError}</p>}</div></details>}
+   {role==='admin'&&<details className="wl-staff" onToggle={e=>setStaffOpened(e.currentTarget.open)}><summary>إدارة حسابات السكرتارية</summary><div className="wl-staff-body"><p>الموظف يسجّل دخول بحسابه، ويرسل UID الظاهر له لتفعيل الصلاحية.</p><form onSubmit={saveStaff}><input dir="ltr" value={staffUid} onChange={e=>setStaffUid(e.target.value)} placeholder="Firebase UID" required/><input value={staffName} onChange={e=>setStaffName(e.target.value)} placeholder="اسم الموظف"/><button type="submit" className="wl-primary" disabled={!!busy}>تفعيل الموظف</button></form>{staffRows.map(row=><div key={row.id} className="wl-staff-row"><span>{row.name} <small dir="ltr">{row.id}</small></span><button onClick={()=>toggleStaff(row)} disabled={!!busy}>{row.active?'إيقاف الصلاحية':'تفعيل الصلاحية'}</button></div>)}{staffError&&<p role="status">{staffError}</p>}</div></details>}
    <p className="wl-privacy">الطلبات التي مرّ عليها 3 شهور تُستبعد تلقائيًا من الانتظار، وتظل في السجل الكامل للحفاظ على تاريخ التسجيل. الحذف اليدوي يزيل الطلب من الانتظار فقط ولا يمسح الاستمارة الأصلية.</p>
   </div>}
   {(error||notice)&&<div role={error?'alert':'status'} className={'wl-toast '+(error?'bad':'good')}><span>{error||notice}</span><button onClick={()=>{setError('');setNotice('');}} aria-label="إغلاق">×</button></div>}
