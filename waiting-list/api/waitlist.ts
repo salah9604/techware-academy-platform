@@ -76,15 +76,37 @@ function normalizeSheetRow(row:string[],index:number):Student|null{
 }
 
 type ServiceAccount={client_email:string;private_key:string;token_uri?:string};
-function serviceAccount():ServiceAccount|null{
- const value=process.env.GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON;
- if(!value)return null;
+type CredentialStatus='missing'|'invalid_json'|'missing_fields'|'wrong_account'|'ready';
+const expectedServiceEmail='techware-waiting-list-sync@techware-instructor.iam.gserviceaccount.com';
+// Credentials are never logged or included in API responses.
+function parseCredential():{status:CredentialStatus;account:ServiceAccount|null}{
+ const original=process.env.GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON;
+ if(!original?.trim())return {status:'missing',account:null};
+ let value=original.trim().replace(/^\uFEFF/,'').replace(/^\`\`\`(?:json)?\s*/i,'').replace(/\s*\`\`\`$/,'');
  let parsed:unknown;
- try{parsed=JSON.parse(value);}catch{throw Object.assign(Error('صيغة اعتماد Google غير صحيحة.'),{status:503});}
- const a=parsed as Partial<ServiceAccount>;
- if(!a||typeof a.client_email!=='string'||!a.client_email.endsWith('.gserviceaccount.com')
-   ||typeof a.private_key!=='string'||!a.private_key.includes('BEGIN PRIVATE KEY'))throw Object.assign(Error('اعتماد Google غير مكتمل.'),{status:503});
- return {client_email:a.client_email,private_key:a.private_key,token_uri:'https://oauth2.googleapis.com/token'};
+ try{
+  parsed=JSON.parse(value);
+  // Some mobile text editors copy a quoted/escaped JSON string.
+  if(typeof parsed==='string')parsed=JSON.parse(parsed);
+ }catch{
+  // Only repair literal line-breaks inside the private_key JSON string.
+  const fixed=value.replace(/("private_key"\s*:\s*")([\s\S]*?)("\s*,)/,(all,start,key,end)=>start+String(key).replace(/\r?\n/g,'\\n')+end);
+  try{parsed=JSON.parse(fixed);if(typeof parsed==='string')parsed=JSON.parse(parsed);}
+  catch{return {status:'invalid_json',account:null};}
+ }
+ if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))return {status:'missing_fields',account:null};
+ const a=parsed as Record<string,unknown>;
+ if(typeof a.client_email!=='string'||typeof a.private_key!=='string'||!a.private_key.includes('BEGIN PRIVATE KEY'))
+  return {status:'missing_fields',account:null};
+ if(a.client_email!==expectedServiceEmail||a.project_id!=='techware-instructor')
+  return {status:'wrong_account',account:null};
+ return {status:'ready',account:{client_email:a.client_email,private_key:a.private_key,token_uri:'https://oauth2.googleapis.com/token'}};
+}
+function serviceAccount():ServiceAccount|null{
+ const check=parseCredential();
+ if(check.status==='missing')return null;
+ if(check.status!=='ready')throw Object.assign(Error('إعداد اعتماد Google يحتاج تصحيح في Vercel. الحالة: '+check.status+'. افتح إعدادات المتغير وتأكد من لصق محتوى JSON كاملًا.'),{status:503});
+ return check.account;
 }
 async function googleAccessToken():Promise<string>{
  const account=serviceAccount();
@@ -139,7 +161,7 @@ async function handler(req:Request):Promise<Response>{
   const person=await authorize(req);
   if(req.method==='GET'){
    const kind=new URL(req.url).searchParams.get('kind')||'list';
-   if(kind==='me')return reply({role:person.role,autoSyncConfigured:!!serviceAccount()});
+   if(kind==='me'){const cfg=parseCredential();return reply({role:person.role,autoSyncConfigured:cfg.status==='ready',credentialStatus:cfg.status});}
    if(kind==='staff'){
     if(person.role!=='admin')return reply({error:'غير مسموح.'},403);
     const data=await readFile<Record<string,Staff>>('staff',{});
@@ -149,7 +171,8 @@ async function handler(req:Request):Promise<Response>{
    // Lazy refresh: at most once per 15 minutes when staff actually access the dashboard.
    // No Google access is required from the secretary's browser.
    const snapshotBefore=await readFile<Snapshot|null>('roster',null);
-   if(serviceAccount()&&(!snapshotBefore.value||Date.now()-Date.parse(snapshotBefore.value.syncedAt)>SOURCE_FRESH_MS)){
+   const cfg=parseCredential();
+   if(cfg.status==='ready'&&(!snapshotBefore.value||Date.now()-Date.parse(snapshotBefore.value.syncedAt)>SOURCE_FRESH_MS)){
     try{await syncRoster({onlyIfStale:true});}
     catch(e){/* Serve last verified snapshot when the external source is unavailable. */}
    }
@@ -158,7 +181,8 @@ async function handler(req:Request):Promise<Response>{
     readFile<Record<string,Decision>>('decisions',{})
    ]);
    return reply({role:person.role,ready:!!snapshot.value,
-    autoSyncConfigured:!!serviceAccount(),
+    autoSyncConfigured:cfg.status==='ready',
+    credentialStatus:cfg.status,
     syncedAt:snapshot.value?.syncedAt||null,
     entries:snapshot.value?.entries||[],
     decisions:decisions.value});
@@ -170,7 +194,9 @@ async function handler(req:Request):Promise<Response>{
    if(person.role!=='admin')return reply({error:'المزامنة للإدارة فقط.'},403);
    // Permanent service account wins. Temporary admin OAuth is kept only for setup.
    const googleToken=typeof body.token==='string'&&body.token.length>50&&body.token.length<4096?body.token:undefined;
-   const result=await syncRoster({token:serviceAccount()?undefined:googleToken,force:true});
+   const cfg=parseCredential();
+   if(cfg.status!=='ready'&&cfg.status!=='missing')return reply({error:'ملف اعتماد Google في Vercel محتاج تصحيح: '+cfg.status+'. افتح المتغير والصق ملف JSON كاملًا من أول { لآخر }.'},503);
+   const result=await syncRoster({token:cfg.status==='ready'?undefined:googleToken,force:true});
    return reply({ok:true,...result});
   }
   if(body.action==='mark'){
