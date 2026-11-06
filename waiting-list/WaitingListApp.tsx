@@ -75,6 +75,9 @@ export default function WaitingListApp(){
  const [error,setError]=useState(''),[notice,setNotice]=useState('');
  const [lastFetchAt,setLastFetchAt]=useState(0);
  const [tab,setTab]=useState<'recent'|'all'>('recent');
+ // Keep a recently handled row on screen so the list doesn't shrink under the finger.
+ const [handledRecent,setHandledRecent]=useState<string[]>([]);
+ const [confirmRemove,setConfirmRemove]=useState<string|null>(null);
  const [query,setQuery]=useState(''),[course,setCourse]=useState('all'),[status,setStatus]=useState('all');
  const [email,setEmail]=useState(''),[staffUid,setStaffUid]=useState(''),[staffName,setStaffName]=useState('');
  const [staff,setStaff]=useState<Staff[]>([]);
@@ -128,10 +131,11 @@ export default function WaitingListApp(){
   return bt-at||b.index-a.index;
  }).map(item=>item.entry);
  const waiting=sortedEntries.filter(e=>classify(e)==='waiting');
+ const visibleRecent=sortedEntries.filter(e=>classify(e)==='waiting'||handledRecent.includes(e.key));
  const attended=data.entries.filter(e=>classify(e)==='attended').length;
  const expired=data.entries.filter(e=>classify(e)==='expired').length;
  const courses=[...new Set(data.entries.map(e=>e.course))].sort((a,b)=>a.localeCompare(b,'ar'));
- const filtered=(tab==='recent'?waiting:sortedEntries).filter(e=>{
+ const filtered=(tab==='recent'?visibleRecent:sortedEntries).filter(e=>{
   const hay=[e.name,e.phone,e.whatsapp,e.course,e.school].join(' ').toLowerCase();
   return (!query.trim()||hay.includes(query.trim().toLowerCase()))&&(course==='all'||e.course===course)&&(status==='all'||classify(e)===status);
  });
@@ -142,7 +146,7 @@ export default function WaitingListApp(){
   setLoading(true);setError('');
   try{
    const list=await api(user,'GET','list') as unknown as FullList;
-   remember(list);setLastFetchAt(now());setNotice('تم تحديث البيانات.');
+   remember(list);setHandledRecent([]);setConfirmRemove(null);setLastFetchAt(now());setNotice('تم تحديث البيانات.');
   }catch(e){setError((e as Error).message);}
   finally{setLoading(false);}
  }
@@ -192,14 +196,21 @@ export default function WaitingListApp(){
  }
  async function mark(e:Entry,next:'attended'|'removed'|'waiting'){
   if(!user||busy)return;
-  if(next==='removed'&&!window.confirm('حذف '+e.name+' من الانتظار؟ السجل الأصلي مش هيتمسح.'))return;
-  setBusy(e.key);setError('');
+  setBusy(e.key);setError('');setNotice('');
   try{
-   await api(user,'POST','',{action:'mark',key:e.key,status:next});
-   const updated={...data,decisions:{...data.decisions,[e.key]:{status:next,actorId:user.uid,updatedAt:new Date().toISOString()}}};
+   const response=await api(user,'POST','',{action:'mark',key:e.key,status:next});
+   const updated={...data,decisions:{...data.decisions,[e.key]:{
+    status:next,actorId:user.uid,updatedAt:String(response.updatedAt||new Date().toISOString())
+   }}};
    remember(updated);
-   setNotice(next==='attended'?'تم تسجيل حضور الطالب.':next==='removed'?'تمت إزالته من الانتظار.':'تم إرجاع الطالب للانتظار.');
-  }catch(err){setError((err as Error).message);}finally{setBusy('');}
+   // Keep the card in place after attendance or removal instead of deleting DOM
+   // elements above the user's scroll position.
+   if(tab==='recent'&&next!=='waiting')
+    setHandledRecent(previous=>previous.includes(e.key)?previous:[...previous,e.key]);
+   setConfirmRemove(null);
+   setNotice(next==='attended'?'تم تسجيل الحضور، والتغيير محفوظ.':next==='removed'?'تم الحذف من قائمة الانتظار، والتغيير محفوظ.':'تم إرجاع الطالب للانتظار.');
+  }catch(err){setError((err as Error).message);}
+  finally{setBusy('');}
  }
  async function loadStaff(){
   if(!user||role!=='admin'||staffLoaded)return;
@@ -242,10 +253,13 @@ export default function WaitingListApp(){
    {!data.ready&&<div className="wl-setup-note">{role==='admin'?'لم تتم المزامنة الأولى بعد. اضغط «تحديث الآن» لعرض السجل، وبعد اعتماد خدمة Google ستعمل المزامنة تلقائيًا.':'الإدارة لم تنفّذ المزامنة الأولى للاستـمارات بعد. بمجرد تنفيذها هتظهر القائمة هنا تلقائيًا عند التحديث.'}</div>}
    <section className="wl-stats"><div><span>في الانتظار</span><strong>{count(waiting.length)}</strong><small>آخر 3 شهور</small></div><div><span>حضروا</span><strong>{count(attended)}</strong><small>تم تأكيد حضورهم</small></div><div><span>انتهت المدة</span><strong>{count(expired)}</strong><small>مستبعدون من القائمة الحديثة</small></div><div><span>إجمالي الاستمارات</span><strong>{count(data.entries.length)}</strong><small>السجل الكامل</small></div></section>
    <section className="wl-panel">
-    <div className="wl-tabs"><button className={tab==='recent'?'selected':''} onClick={()=>{setTab('recent');setStatus('all');}}>قائمة آخر 3 شهور <b>{count(waiting.length)}</b></button><button className={tab==='all'?'selected':''} onClick={()=>setTab('all')}>القائمة الكاملة <b>{count(data.entries.length)}</b></button></div>
+    <div className="wl-tabs"><button type="button" className={tab==='recent'?'selected':''} onClick={()=>{setTab('recent');setStatus('all');setConfirmRemove(null);}}>قائمة آخر 3 شهور <b>{count(waiting.length)}</b></button><button type="button" className={tab==='all'?'selected':''} onClick={()=>{setTab('all');setHandledRecent([]);setConfirmRemove(null);}}>القائمة الكاملة <b>{count(data.entries.length)}</b></button></div>
     <div className="wl-filters"><input aria-label="بحث" value={query} onChange={e=>setQuery(e.target.value)} placeholder="ابحث باسم الطالب أو رقم ولي الأمر..."/><select aria-label="الكورس" value={course} onChange={e=>setCourse(e.target.value)}><option value="all">كل الكورسات</option>{courses.map(c=><option key={c} value={c}>{c}</option>)}</select>{tab==='all'&&<select aria-label="حالة الطالب" value={status} onChange={e=>setStatus(e.target.value)}><option value="all">كل الحالات</option>{Object.entries(badges).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select>}</div>
     {loading&&!data.ready?<div className="wl-state"><div className="wl-loader"/></div>:!data.ready?<div className="wl-state"><strong>قائمة الانتظار لم تُزامَن بعد</strong><p>مطلوب تنفيذ المزامنة الأولى من حساب الإدارة.</p></div>:filtered.length===0?<div className="wl-state"><strong>لا توجد نتائج مطابقة</strong><p>جرّب تغيير الفلاتر.</p></div>:
-    <div className="wl-list">{filtered.map(e=>{const state=classify(e),contact=contactLinks(e.whatsapp,e.phone);return <article className="wl-entry" key={e.key}><div className="wl-entry-main"><div className="wl-avatar">{e.name.charAt(0)}</div><div><div className="wl-name">{e.name}<span className={'wl-badge '+state}>{badges[state]}</span></div><div className="wl-meta"><span>{e.course}</span>{e.age&&<span>العمر: {e.age}</span>}<span>تسجيل: {prettyDate(e.date)}</span></div></div></div><div className="wl-info"><span dir="ltr">{contact.localPhone||e.phone||'لا يوجد رقم'}</span>{contact.target?<a href={contact.target.whatsappUrl} target="_blank" rel="noopener noreferrer" title={contact.fallback?'رقم الواتساب غير صحيح أو غير موجود؛ تم استخدام رقم الهاتف الموجود في الاستمارة': 'افتح واتساب على الرقم المسجل'}>واتساب: {contact.target.local}{contact.fallback?' (رقم الهاتف)':''}</a>:(e.whatsapp||e.phone)?<span className="wl-phone-invalid" title="الرقم غير مكتمل أو لا يطابق صيغة موبايل مصري سليمة">رقم غير صالح للواتساب</span>:null}{e.school&&<span>{e.school}</span>}{e.notes&&<details><summary>ملاحظات</summary><p>{e.notes}</p></details>}</div><div className="wl-actions">{state==='waiting'?<><button className="wl-attend" disabled={!!busy} onClick={()=>mark(e,'attended')}>تسجيل حضور</button><button className="wl-remove" disabled={!!busy} onClick={()=>mark(e,'removed')}>حذف من الانتظار</button></>:<button className="wl-restore" disabled={!!busy||state==='expired'} onClick={()=>mark(e,'waiting')}>{state==='expired'?'انتهت صلاحية الطلب':'إرجاع للانتظار'}</button>}</div></article>})}</div>}
+    <div className="wl-list">{filtered.map(e=>{const state=classify(e),contact=contactLinks(e.whatsapp,e.phone);return <article className={'wl-entry '+(handledRecent.includes(e.key)&&state!=='waiting'?'wl-entry-handled':'')} key={e.key}><div className="wl-entry-main"><div className="wl-avatar">{e.name.charAt(0)}</div><div><div className="wl-name">{e.name}<span className={'wl-badge '+state}>{badges[state]}</span></div><div className="wl-meta"><span>{e.course}</span>{e.age&&<span>العمر: {e.age}</span>}<span>تسجيل: {prettyDate(e.date)}</span></div></div></div><div className="wl-info"><span dir="ltr">{contact.localPhone||e.phone||'لا يوجد رقم'}</span>{contact.target?<a href={contact.target.whatsappUrl} target="_blank" rel="noopener noreferrer" title={contact.fallback?'رقم الواتساب غير صحيح أو غير موجود؛ تم استخدام رقم الهاتف الموجود في الاستمارة': 'افتح واتساب على الرقم المسجل'}>واتساب: {contact.target.local}{contact.fallback?' (رقم الهاتف)':''}</a>:(e.whatsapp||e.phone)?<span className="wl-phone-invalid" title="الرقم غير مكتمل أو لا يطابق صيغة موبايل مصري سليمة">رقم غير صالح للواتساب</span>:null}{e.school&&<span>{e.school}</span>}{e.notes&&<details><summary>ملاحظات</summary><p>{e.notes}</p></details>}</div><div className="wl-actions">{state==='waiting'?confirmRemove===e.key?
+ <div className="wl-delete-confirm"><span>تأكيد حذف الطالب من الانتظار؟</span><button type="button" className="wl-remove" disabled={!!busy} onClick={event=>{event.currentTarget.blur();mark(e,'removed');}}>تأكيد الحذف</button><button type="button" className="wl-restore" onClick={event=>{event.currentTarget.blur();setConfirmRemove(null);}}>إلغاء</button></div>:
+ <><button type="button" className="wl-attend" disabled={!!busy} onClick={event=>{event.currentTarget.blur();mark(e,'attended');}}>{busy===e.key?'جاري الحفظ...':'تسجيل حضور'}</button><button type="button" className="wl-remove" disabled={!!busy} onClick={event=>{event.currentTarget.blur();setConfirmRemove(e.key);}}>حذف من الانتظار</button></>:
+ <button type="button" className="wl-restore" disabled={!!busy||state==='expired'} onClick={event=>{event.currentTarget.blur();mark(e,'waiting');}}>{busy===e.key?'جاري الحفظ...':state==='expired'?'انتهت صلاحية الطلب':'إرجاع للانتظار'}</button>}</div></article>})}</div>}
     <footer className="wl-footer"><span>{filtered.length.toLocaleString('ar-EG')} طلب ظاهر · الأحدث تسجيلًا أولًا</span><span>آخر مزامنة استمارات: {displayTime(data.syncedAt)}</span></footer>
    </section>
    {role==='admin'&&<details className="wl-staff" onToggle={e=>{if(e.currentTarget.open)loadStaff();}}><summary>إدارة حسابات السكرتارية</summary><div className="wl-staff-body"><p>الموظف يسجل بحسابه العادي ويبعت كود الحساب للإدارة. فعّله هنا مرة واحدة فقط.</p><form onSubmit={saveStaff}><input dir="ltr" value={staffUid} onChange={e=>setStaffUid(e.target.value)} placeholder="كود حساب Firebase" required/><input value={staffName} onChange={e=>setStaffName(e.target.value)} placeholder="اسم الموظف"/><button className="wl-primary" type="submit" disabled={!!busy}>تفعيل الحساب</button></form>{staff.map(r=><div className="wl-staff-row" key={r.uid}><span>{r.name}<small dir="ltr">{r.uid}</small></span><button onClick={()=>toggleStaff(r)} disabled={!!busy}>{r.active?'إيقاف الصلاحية':'تفعيل الصلاحية'}</button></div>)}</div></details>}
