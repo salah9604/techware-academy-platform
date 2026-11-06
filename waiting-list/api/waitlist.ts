@@ -1,11 +1,12 @@
 import {get,put,BlobPreconditionFailedError} from '@vercel/blob';
-import {createRemoteJWKSet,jwtVerify} from 'jose';
+import {createRemoteJWKSet,jwtVerify,importPKCS8,SignJWT} from 'jose';
 import {createHash} from 'node:crypto';
 
 const project='techware-instructor';
 const base='techware-waiting-list/v2/';
 const source='1vZcM6n0eDhDXbi1jNMSpfVWQNLmGBEieqJSgTj_V080';
-const tab="'waiting list'!A2:L1500";
+const tab="'waiting list'!A2:L10000";
+const SOURCE_FRESH_MS=15*60*1000;
 const jwks=createRemoteJWKSet(new URL('https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com'));
 const reply=(value:unknown,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}});
 type Role='admin'|'staff';
@@ -73,6 +74,63 @@ function normalizeSheetRow(row:string[],index:number):Student|null{
   age:String(row[2]||'').slice(0,30),course:String(row[7]||'غير محدد').slice(0,100),
   notes:String(row[8]||'').slice(0,1000),school:String(row[6]||'').slice(0,160),initialStatus};
 }
+
+type ServiceAccount={client_email:string;private_key:string;token_uri?:string};
+function serviceAccount():ServiceAccount|null{
+ const value=process.env.GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON;
+ if(!value)return null;
+ let parsed:unknown;
+ try{parsed=JSON.parse(value);}catch{throw Object.assign(Error('صيغة اعتماد Google غير صحيحة.'),{status:503});}
+ const a=parsed as Partial<ServiceAccount>;
+ if(!a||typeof a.client_email!=='string'||!a.client_email.endsWith('.gserviceaccount.com')
+   ||typeof a.private_key!=='string'||!a.private_key.includes('BEGIN PRIVATE KEY'))throw Object.assign(Error('اعتماد Google غير مكتمل.'),{status:503});
+ return {client_email:a.client_email,private_key:a.private_key,token_uri:'https://oauth2.googleapis.com/token'};
+}
+async function googleAccessToken():Promise<string>{
+ const account=serviceAccount();
+ if(!account)throw Object.assign(Error('مطلوب تفعيل اتصال Google الدائم من الإدارة مرة واحدة.'),{status:503});
+ const key=await importPKCS8(account.private_key,'RS256');
+ const assertion=await new SignJWT({scope:'https://www.googleapis.com/auth/spreadsheets.readonly'})
+  .setProtectedHeader({alg:'RS256',typ:'JWT'})
+  .setIssuer(account.client_email).setSubject(account.client_email)
+  .setAudience(account.token_uri||'https://oauth2.googleapis.com/token')
+  .setIssuedAt().setExpirationTime('50m').sign(key);
+ const response=await fetch('https://oauth2.googleapis.com/token',{
+  method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+  body:new URLSearchParams({grant_type:'urn:ietf:params:oauth:grant-type:jwt-bearer',assertion}),
+  signal:AbortSignal.timeout(12000)
+ });
+ if(!response.ok)throw Object.assign(Error('تعذر اعتماد خدمة Google تلقائيًا. راجع صلاحيات حساب الخدمة.'),{status:502});
+ const result=await response.json() as {access_token?:string};
+ if(!result.access_token)throw Object.assign(Error('Google لم يصدر رمز وصول صالح.'),{status:502});
+ return result.access_token;
+}
+export async function syncRoster(options?:{token?:string;force?:boolean;onlyIfStale?:boolean}){
+ const configured=!!serviceAccount();
+ if(!configured&&!options?.token)throw Object.assign(Error('اتصال Google الدائم لم يتم إعداده بعد.'),{status:503});
+ const old=await readFile<Snapshot|null>('roster',null);
+ if(options?.onlyIfStale&&old.value&&Date.now()-Date.parse(old.value.syncedAt)<SOURCE_FRESH_MS){
+  return {count:old.value.entries.length,syncedAt:old.value.syncedAt,skipped:true};
+ }
+ const token=options?.token||await googleAccessToken();
+ const url='https://sheets.googleapis.com/v4/spreadsheets/'+source+'/values/'+encodeURIComponent(tab);
+ const response=await fetch(url,{headers:{Authorization:'Bearer '+token},signal:AbortSignal.timeout(15000)});
+ if(!response.ok){
+  if(response.status===403)throw Object.assign(Error('حساب الخدمة محتاج صلاحية Reader على ملف تسجيلات Techware أو تفعيل Google Sheets API.'),{status:424});
+  throw Object.assign(Error('تعذر قراءة استمارات Google أثناء المزامنة ('+response.status+').'),{status:502});
+ }
+ const data=await response.json() as {values?:string[][]};
+ if(!Array.isArray(data.values))throw Object.assign(Error('لم تُسترجع بيانات صحيحة من الاستمارات.'),{status:502});
+ const entries=data.values.map((row,i)=>normalizeSheetRow(row,i)).filter((row):row is Student=>!!row);
+ if(!entries.length)throw Object.assign(Error('ملف الاستمارات رجع فاضي؛ تم الاحتفاظ بالبيانات القديمة دون تغيير.'),{status:409});
+ // Guard against accidental truncation caused by source API mistakes.
+ if(old.value?.entries?.length&&entries.length<old.value.entries.length*.7)
+  throw Object.assign(Error('البيانات الجديدة أقل كثيرًا من السجل السابق؛ المزامنة توقفت لحماية السجل.'),{status:409});
+ const stamp=new Date().toISOString();
+ await updateFile<Snapshot|null>('roster',null,()=>({entries,syncedAt:stamp,source:'Techware courses (Responses)'}));
+ return {count:entries.length,syncedAt:stamp,skipped:false};
+}
+
 export async function GET(request:Request):Promise<Response>{return handler(request);}
 export async function POST(request:Request):Promise<Response>{return handler(request);}
 async function handler(req:Request):Promise<Response>{
@@ -88,11 +146,19 @@ async function handler(req:Request):Promise<Response>{
     return reply({staff:Object.values(data.value)});
    }
    if(kind!=='list')return reply({error:'Unknown request'},400);
+   // Lazy refresh: at most once per 15 minutes when staff actually access the dashboard.
+   // No Google access is required from the secretary's browser.
+   const snapshotBefore=await readFile<Snapshot|null>('roster',null);
+   if(serviceAccount()&&(!snapshotBefore.value||Date.now()-Date.parse(snapshotBefore.value.syncedAt)>SOURCE_FRESH_MS)){
+    try{await syncRoster({onlyIfStale:true});}
+    catch(e){/* Serve last verified snapshot when the external source is unavailable. */}
+   }
    const [snapshot,decisions]=await Promise.all([
     readFile<Snapshot|null>('roster',null),
     readFile<Record<string,Decision>>('decisions',{})
    ]);
    return reply({role:person.role,ready:!!snapshot.value,
+    autoSyncConfigured:!!serviceAccount(),
     syncedAt:snapshot.value?.syncedAt||null,
     entries:snapshot.value?.entries||[],
     decisions:decisions.value});
@@ -102,17 +168,10 @@ async function handler(req:Request):Promise<Response>{
   if(!body||typeof body.action!=='string')return reply({error:'بيانات غير صحيحة.'},400);
   if(body.action==='sync'){
    if(person.role!=='admin')return reply({error:'المزامنة للإدارة فقط.'},403);
-   if(typeof body.token!=='string'||body.token.length<50||body.token.length>4096)return reply({error:'محتاج ربط حساب Google للإدارة مرة واحدة.'},400);
-   const url='https://sheets.googleapis.com/v4/spreadsheets/'+source+'/values/'+encodeURIComponent(tab);
-   const res=await fetch(url,{headers:{Authorization:'Bearer '+body.token}});
-   if(!res.ok)return reply({error:'Google رفض قراءة الملف، راجع صلاحية الحساب وGoogle Sheets API.',googleStatus:res.status},424);
-   const data=await res.json() as {values?:string[][]};
-   if(!Array.isArray(data.values))return reply({error:'ملف الاستمارات لم يرجّع بيانات صحيحة.'},502);
-   const entries=data.values.map((row,i)=>normalizeSheetRow(row,i)).filter((row):row is Student=>!!row);
-   if(entries.length===0)return reply({error:'ملف الانتظار رجع بدون طلاب. تم إلغاء المزامنة حفاظًا على البيانات السابقة.'},409);
-   // Import is read-only against the original sheet: attendance decisions stay independently durable.
-   await updateFile<Snapshot|null>('roster',null,()=>({entries,syncedAt:new Date().toISOString(),source:'Techware courses (Responses)'}));
-   return reply({ok:true,count:entries.length,syncedAt:new Date().toISOString()});
+   // Permanent service account wins. Temporary admin OAuth is kept only for setup.
+   const googleToken=typeof body.token==='string'&&body.token.length>50&&body.token.length<4096?body.token:undefined;
+   const result=await syncRoster({token:serviceAccount()?undefined:googleToken,force:true});
+   return reply({ok:true,...result});
   }
   if(body.action==='mark'){
    if(typeof body.key!=='string'||!/^sheet__[0-9a-f]{36}$/.test(body.key))return reply({error:'معرّف الطالب غير صحيح.'},400);
