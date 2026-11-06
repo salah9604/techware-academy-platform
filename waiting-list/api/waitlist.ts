@@ -146,17 +146,6 @@ async function googleAccessToken():Promise<string>{
  if(!result.access_token)throw Object.assign(Error('Google لم يصدر رمز وصول صالح.'),{status:502});
  return result.access_token;
 }
-// Temporary no-data connectivity probe; never returns tokens, rows, or credentials.
-export async function probeGoogleConnection():Promise<'ok'|'oauth_error'|'sheet_forbidden'|'sheet_error'>{
- try{
-  const access=await googleAccessToken();
-  const url='https://sheets.googleapis.com/v4/spreadsheets/'+source+'/values/'+encodeURIComponent("'waiting list'!A1:A1");
-  const result=await fetch(url,{headers:{Authorization:'Bearer '+access},signal:AbortSignal.timeout(12000)});
-  if(result.ok)return 'ok';
-  if(result.status===401||result.status===403)return 'sheet_forbidden';
-  return 'sheet_error';
- }catch{return 'oauth_error';}
-}
 export async function syncRoster(options?:{token?:string;force?:boolean;onlyIfStale?:boolean}){
  const configured=!!serviceAccount();
  if(!configured&&!options?.token)throw Object.assign(Error('اتصال Google الدائم لم يتم إعداده بعد.'),{status:503});
