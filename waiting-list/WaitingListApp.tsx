@@ -1,14 +1,16 @@
 'use client';
 import {useEffect,useMemo,useState,type FormEvent} from 'react';
-import {GoogleAuthProvider,browserLocalPersistence,onAuthStateChanged,setPersistence,signInWithEmailAndPassword,signInWithPopup,signOut,type User} from 'firebase/auth';
+import {GoogleAuthProvider,browserLocalPersistence,onAuthStateChanged,setPersistence,signInWithEmailAndPassword,signInWithPopup,signOut,reauthenticateWithPopup,linkWithPopup,type User} from 'firebase/auth';
 import {collection,doc,documentId,getDoc,getDocs,getFirestore,limit,onSnapshot,orderBy,query,serverTimestamp,setDoc,startAfter,type DocumentData,type QueryDocumentSnapshot} from 'firebase/firestore';
 import {firebaseAuth} from './firebase-client';
 import './waiting-list.css';
 
-type Entry={key:string;source:string;name:string;phone:string;whatsapp:string;course:string;age:string;date:Date|null;notes:string;school:string};
+type Entry={key:string;source:string;name:string;phone:string;whatsapp:string;course:string;age:string;date:Date|null;notes:string;school:string;docId?:string};
 type Decision={status:'attended'|'removed'|'waiting';updatedAt?:unknown;actorId?:string};
 type Tab='recent'|'all';
-const sources=['registrationForms','formSubmissions','courseRegistrations','registrations','enrollments','forms','waitingListSubmissions'];
+const sourceSpreadsheet='1vZcM6n0eDhDXbi1jNMSpfVWQNLmGBEieqJSgTj_V080';
+const sourceTab="'waiting list'";
+const sheetsEndpoint='https://sheets.googleapis.com/v4/spreadsheets/'+sourceSpreadsheet+'/values/';
 const waitRoot='academyWaitingList/techware';
 const choose=(d:DocumentData,keys:string[])=>{for(const k of keys){const value=d[k];if(value!==undefined&&value!==null&&String(value).trim())return String(value).trim();}return '';};
 function safeDate(v:unknown):Date|null{
@@ -16,6 +18,7 @@ function safeDate(v:unknown):Date|null{
  if(typeof v==='object'&&v!==null){const o=v as {toDate?:()=>Date;seconds?:number};if(typeof o.toDate==='function')return o.toDate();if(typeof o.seconds==='number')return new Date(o.seconds*1000);}
  if(typeof v==='number')return new Date(v<1e11?v*1000:v);
  const s=String(v).trim();if(/^\d{13}$/.test(s))return new Date(Number(s));if(/^\d{10}$/.test(s))return new Date(Number(s)*1000);
+ const ymd=s.match(/(20\d\d)[\/-](\d{1,2})[\/-](\d{1,2})/);if(ymd)return valid(new Date(+ymd[1],+ymd[2]-1,+ymd[3]));
  const egypt=s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);if(egypt)return valid(new Date(+egypt[3],+egypt[2]-1,+egypt[1]));
  return valid(new Date(s));
 }
@@ -32,6 +35,24 @@ function formEntry(source:string,id:string,d:DocumentData):Entry|null{
   notes:choose(d,['notes','note','message','ملاحظات']),
   school:choose(d,['school_name','schoolName','school','المدرسة'])};
 }
+function sheetEntry(row:string[],index:number):Entry|null{
+ const name=String(row[1]||'').trim();if(!name)return null;
+ return {key:'sheet__'+(index+2),source:'sheet',name,
+  date:safeDate(row[0]),age:String(row[2]||''),
+  phone:String(row[4]||''),whatsapp:String(row[5]||''),
+  school:String(row[6]||''),course:String(row[7]||'').trim()||'غير محدد',
+  notes:String(row[8]||''),docId:String(row[10]||'')};
+}
+async function sheetsRequest(token:string,path:string){
+ const response=await fetch(sheetsEndpoint+encodeURIComponent(path),{headers:{Authorization:'Bearer '+token}});
+ const payload=await response.json().catch(()=>({}));
+ if(!response.ok){
+  if(response.status===401)throw Error('انتهت صلاحية الاتصال بـGoogle. اضغط ربط الاستمارات مرة تانية.');
+  if(response.status===403)throw Error('حساب Google ده مش مسموح له بقراءة ملف استمارات Techware، أو Google Sheets API مش مفعّلة.');
+  throw Error(String(payload?.error?.message||'تعذّر الاتصال باستمارات Google.'));
+ }
+ return payload as {values?:string[][]};
+}
 const format=(d:Date|null)=>d?new Intl.DateTimeFormat('ar-EG',{year:'numeric',month:'short',day:'numeric'}).format(d):'التاريخ غير مسجّل';
 function cutoff(now:Date){const d=new Date(now);const day=d.getDate();d.setHours(0,0,0,0);d.setDate(1);d.setMonth(d.getMonth()-3);d.setDate(Math.min(day,new Date(d.getFullYear(),d.getMonth()+1,0).getDate()));return d;}
 const readable=(e:unknown)=>{const code=(e as {code?:string})?.code||'';if(code==='permission-denied')return 'صلاحيات Firebase لم تتفعّل بعد، أو حسابك غير مسموح له بقراءة بيانات الاستمارات.';return e instanceof Error?e.message:'حدث خطأ في الاتصال بقاعدة البيانات.';};
@@ -47,12 +68,14 @@ export default function WaitingListApp(){
  const [now,setNow]=useState(new Date()),[reload,setReload]=useState(0);
  const [email,setEmail]=useState(''),[staffUid,setStaffUid]=useState(''),[staffName,setStaffName]=useState('');
  const [staffRows,setStaffRows]=useState<{id:string;name:string;active:boolean}[]>([]);
+ const [sheetToken,setSheetToken]=useState('');
+ const [dataReady,setDataReady]=useState(false);
  const db=useMemo(()=>getFirestore(firebaseAuth().app),[]);
  useEffect(()=>{const old=document.title;document.title='قائمة الانتظار | Techware Academy';return()=>{document.title=old;};},[]);
  useEffect(()=>onAuthStateChanged(firebaseAuth(),u=>{setUser(u);setAuthReady(true);setRole('checking');},e=>{setAuthReady(true);setError(readable(e));}),[]);
  useEffect(()=>{const timer=setInterval(()=>setNow(new Date()),60_000);return()=>clearInterval(timer);},[]);
  useEffect(()=>{
-  if(!user){setRole('checking');setEntries([]);setDecisions({});return;}
+  if(!user){setRole('checking');setEntries([]);setDecisions({});setSheetToken('');setDataReady(false);return;}
   let cancelled=false;setRole('checking');setError('');
   (async()=>{
    const [portal,legacy,staff]=await Promise.all([
@@ -67,35 +90,26 @@ export default function WaitingListApp(){
   return()=>{cancelled=true;};
  },[user?.uid,db]);
  useEffect(()=>{
-  if(!user||!['admin','staff'].includes(role))return;
-  setLoading(true);setError('');let cancelled=false;
-  const unsub=onSnapshot(collection(db,waitRoot+'/decisions'),snap=>{
-   if(cancelled)return;const m:Record<string,Decision>={};snap.docs.forEach(d=>m[d.id]=d.data() as Decision);setDecisions(m);
-  },e=>{if(!cancelled)setError(readable(e));});
+  if(!user||!['admin','staff'].includes(role)||!sheetToken)return;
+  let cancelled=false;setLoading(true);setError('');
   (async()=>{
-   const result=await Promise.allSettled(sources.map(async source=>{
-    const result:Entry[]=[];let last:QueryDocumentSnapshot<DocumentData>|undefined;
-    for(let page=0;page<80;page++){
-     // Order by document ID so a complete scan never silently stops at the first batch.
-     const pageQuery=last?query(collection(db,source),orderBy(documentId()),startAfter(last),limit(300)):query(collection(db,source),orderBy(documentId()),limit(300));
-     const snapshot=await getDocs(pageQuery);
-     snapshot.docs.forEach(d=>{const row=formEntry(source,d.id,d.data());if(row)result.push(row);});
-     if(snapshot.docs.length<300)break;last=snapshot.docs[snapshot.docs.length-1];
-     if(page===79)throw Error('تجاوزت الاستمارات حد عرض 24,000 سجل في مصدر '+source);
-    }return result;
-   }));
+   const result=await sheetsRequest(sheetToken,sourceTab+'!A2:L10000');
    if(cancelled)return;
-   const ok=result.filter((r):r is PromiseFulfilledResult<Entry[]>=>r.status==='fulfilled');
-   const failed=result.filter((r):r is PromiseRejectedResult=>r.status==='rejected');
-   if(ok.length===0){setError(readable(failed[0]?.reason));setEntries([]);}
-   else{
-    setEntries(ok.flatMap(r=>r.value).sort((a,b)=>(b.date?.getTime()||0)-(a.date?.getTime()||0)));
-    if(failed.length)setNotice('بعض مصادر الاستمارات لم تُقرأ. راجع صلاحيات Firebase.');
-    setLastSync(new Date());
-   }
-  })().catch(e=>{if(!cancelled)setError(readable(e));}).finally(()=>{if(!cancelled)setLoading(false);});
-  return()=>{cancelled=true;unsub();};
- },[user?.uid,role,db,reload]);
+   const rows=(result.values||[]).map((row,i)=>sheetEntry(row,i)).filter((row):row is Entry=>row!==null);
+   const flags:Record<string,Decision>={};
+   (result.values||[]).forEach((r,i)=>{
+    const key='sheet__'+(i+2);
+    const attended=/^(حضر|نعم|yes|true|تم الحضور|1)$/i.test(String(r[9]||'').trim());
+    const removed=!!String(r[11]||'').trim();
+    if(removed)flags[key]={status:'removed'};
+    else if(attended)flags[key]={status:'attended'};
+   });
+   setDecisions(flags);setEntries(rows.sort((a,b)=>(b.date?.getTime()||0)-(a.date?.getTime()||0)));
+   setDataReady(true);setLastSync(new Date());setNotice('');
+  })().catch(e=>{if(!cancelled){setError(readable(e));setDataReady(false);}})
+  .finally(()=>{if(!cancelled)setLoading(false);});
+  return()=>{cancelled=true;};
+ },[user?.uid,role,sheetToken,reload]);
  useEffect(()=>{
   if(role!=='admin')return;
   return onSnapshot(collection(db,waitRoot+'/staff'),snap=>setStaffRows(snap.docs.map(d=>({id:d.id,name:String(d.data().name||''),active:d.data().active===true}))),e=>setError(readable(e)));
@@ -110,6 +124,22 @@ export default function WaitingListApp(){
   const hay=(e.name+' '+e.phone+' '+e.whatsapp+' '+e.course+' '+e.school).toLowerCase();
   const needle=search.trim().toLowerCase();return (!needle||hay.includes(needle)||canonical(hay).includes(canonical(needle)))&&(course==='all'||e.course===course)&&(status==='all'||classify(e)===status);
  });
+ async function connectSheet(){
+  if(!user)return;
+  setBusy('connect');setError('');
+  try{
+   const provider=new GoogleAuthProvider();
+   provider.addScope('https://www.googleapis.com/auth/spreadsheets');
+   provider.setCustomParameters({prompt:'consent select_account'});
+   const result=user.providerData.some(p=>p.providerId==='google.com')
+     ?await reauthenticateWithPopup(user,provider)
+     :await linkWithPopup(user,provider);
+   const credential=GoogleAuthProvider.credentialFromResult(result);
+   if(!credential?.accessToken)throw Error('لم يتم منح صلاحية Google Sheets. حاول الربط مرة تانية.');
+   setSheetToken(credential.accessToken);setDataReady(false);
+  }catch(e){setError(readable(e));}
+  finally{setBusy('');}
+ }
  async function loginWithGoogle(){setBusy('login');setError('');try{const auth=firebaseAuth();await setPersistence(auth,browserLocalPersistence);await signInWithPopup(auth,new GoogleAuthProvider());}catch(e){setError(readable(e));}finally{setBusy('');}}
  async function loginWithEmail(e:FormEvent<HTMLFormElement>){e.preventDefault();setBusy('login');setError('');try{const auth=firebaseAuth();await setPersistence(auth,browserLocalPersistence);const pwd=String(new FormData(e.currentTarget).get('password')||'');await signInWithEmailAndPassword(auth,email.trim(),pwd);}catch(e){setError(readable(e));}finally{setBusy('');}}
  async function mark(e:Entry,next:'attended'|'removed'|'waiting'){
