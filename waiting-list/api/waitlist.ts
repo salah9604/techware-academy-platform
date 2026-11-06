@@ -100,7 +100,14 @@ function parseCredential():{status:CredentialStatus;account:ServiceAccount|null}
   return {status:'missing_fields',account:null};
  if(a.client_email!==expectedServiceEmail||a.project_id!=='techware-instructor')
   return {status:'wrong_account',account:null};
- return {status:'ready',account:{client_email:a.client_email,private_key:a.private_key,token_uri:'https://oauth2.googleapis.com/token'}};
+ return {status:'ready',account:{client_email:a.client_email,private_key:a.private_key.replace(/\\n/g,'\n'),token_uri:'https://oauth2.googleapis.com/token'}};
+}
+// Safe status for the diagnostic endpoint — never returns any private key data.
+export async function credentialHealth():Promise<CredentialStatus|'malformed_key'>{
+ const cfg=parseCredential();
+ if(cfg.status!=='ready'||!cfg.account)return cfg.status;
+ try{await importPKCS8(cfg.account.private_key,'RS256');return 'ready';}
+ catch{return 'malformed_key';}
 }
 function serviceAccount():ServiceAccount|null{
  const check=parseCredential();
