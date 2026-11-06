@@ -1,6 +1,6 @@
-import {get,put,BlobPreconditionFailedError} from '@vercel/blob';
+import {get,put,list,BlobPreconditionFailedError} from '@vercel/blob';
 import {createRemoteJWKSet,jwtVerify,importPKCS8,SignJWT} from 'jose';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 
 const project='techware-instructor';
 const base='techware-waiting-list/v2/';
@@ -50,6 +50,52 @@ async function updateFile<T>(name:'decisions'|'staff',fallback:T,transform:(prev
   }
  }
  throw Object.assign(Error('فيه تعديل اتسجل في نفس اللحظة. جرّب الحفظ تاني.'),{status:409});
+}
+/**
+ * Immutable decision events prevent the shared-ledger ETag contention.
+ * Vercel Blob list() returns private file metadata, so one listing can
+ * reconstruct statuses without a separate read per student.
+ * Previous decisions.json is still read and merged (no data migration loss).
+ */
+const eventsPrefix=base+'decision-events/';
+const eventName=/^(sheet__[a-f0-9]{36})_(\d{13})_(attended|removed|waiting)_[a-f0-9-]{36}\.json$/;
+async function readDecisionEvents():Promise<Record<string,Decision>>{
+ const result:Record<string,Decision>={};
+ let cursor:string|undefined;
+ for(let page=0;page<20;page++){
+  const batch=await list({prefix:eventsPrefix,limit:1000,...(cursor?{cursor}:{})});
+  for(const blob of batch.blobs){
+   const name=blob.pathname.slice(eventsPrefix.length);
+   const match=name.match(eventName);
+   if(!match)continue;
+   const stamp=Number(match[2]);
+   const updatedAt=new Date(stamp).toISOString();
+   const key=match[1],previous=result[key];
+   if(!previous||updatedAt>=previous.updatedAt)
+    result[key]={status:match[3] as Decision['status'],actorId:'',updatedAt};
+  }
+  if(!batch.hasMore)return result;
+  if(!batch.cursor)throw Object.assign(Error('تعذر استكمال سجل تحديثات الطلاب.'),{status:503});
+  cursor=batch.cursor;
+ }
+ throw Object.assign(Error('سجل الحضور كبير جدًا ويحتاج أرشفة قبل تحميله.'),{status:503});
+}
+function mergeDecisions(legacy:Record<string,Decision>,events:Record<string,Decision>){
+ const merged={...legacy};
+ for(const [key,value] of Object.entries(events)){
+  const old=merged[key];
+  if(!old||!old.updatedAt||value.updatedAt>=old.updatedAt)merged[key]=value;
+ }
+ return merged;
+}
+async function appendDecision(key:string,status:Decision['status'],actorId:string){
+ const time=Date.now();
+ const name=eventsPrefix+key+'_'+time+'_'+status+'_'+randomUUID()+'.json';
+ await put(name,JSON.stringify({key,status,actorId,updatedAt:new Date(time).toISOString()}),{
+  access:'private',contentType:'application/json; charset=utf-8',
+  cacheControlMaxAge:60,allowOverwrite:false
+ });
+ return new Date(time).toISOString();
 }
 async function profileFromFirestore(token:string,path:string):Promise<Record<string,unknown>|null>{
  const url='https://firestore.googleapis.com/v1/projects/'+project+'/databases/(default)/documents/'+path.split('/').map(encodeURIComponent).join('/');
@@ -211,16 +257,17 @@ async function handler(req:Request):Promise<Response>{
     try{await syncRoster({onlyIfStale:true});}
     catch(e){/* Serve last verified snapshot when the external source is unavailable. */}
    }
-   const [snapshot,decisions]=await Promise.all([
+   const [snapshot,legacyDecisions,eventDecisions]=await Promise.all([
     readFile<Snapshot|null>('roster',null),
-    readFile<Record<string,Decision>>('decisions',{})
+    readFile<Record<string,Decision>>('decisions',{}),
+    readDecisionEvents()
    ]);
    return reply({role:person.role,ready:!!snapshot.value,
     autoSyncConfigured:cfg.status==='ready',
     credentialStatus:cfg.status,
     syncedAt:snapshot.value?.syncedAt||null,
     entries:snapshot.value?.entries||[],
-    decisions:decisions.value});
+    decisions:mergeDecisions(legacyDecisions.value,eventDecisions)});
   }
   if(Number(req.headers.get('content-length')||0)>2_000_000)return reply({error:'طلب كبير جدًا.'},413);
   const body=await req.json().catch(()=>null) as {action?:string;token?:string;key?:string;status?:string;uid?:string;name?:string;active?:boolean}|null;
@@ -240,8 +287,10 @@ async function handler(req:Request):Promise<Response>{
    if(!['waiting','attended','removed'].includes(String(body.status)))return reply({error:'حالة غير صحيحة.'},400);
    const snap=await readFile<Snapshot|null>('roster',null);
    if(!snap.value?.entries?.some(e=>e.key===key))return reply({error:'الطالب غير موجود؛ حدّث القائمة.'},404);
-   const status=body.status as Decision['status'],updatedAt=new Date().toISOString();
-   await updateFile<Record<string,Decision>>('decisions',{},prev=>({...prev,[key]:{status,actorId:person.uid,updatedAt}}));
+   const status=body.status as Decision['status'];
+   // Append only: no shared document to overwrite, so unrelated students can
+   // be updated at exactly the same time without a saving conflict.
+   const updatedAt=await appendDecision(key,status,person.uid);
    return reply({ok:true,key,status,updatedAt});
   }
   if(body.action==='staff'){
