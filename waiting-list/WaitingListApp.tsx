@@ -49,7 +49,7 @@ function dateOf(text:string):Date|null{
  const d=new Date(text);
  return Number.isFinite(d.getTime())?d:null;
 }
-function prettyDate(value:string|null){const date=value?dateOf(value):null;return date?new Intl.DateTimeFormat('ar-EG',{year:'numeric',month:'short',day:'numeric'}).format(date):'غير مسجّل';}
+function prettyDate(value:string|null){const date=value?dateOf(value):null;return date?new Intl.DateTimeFormat('ar-EG',{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(date):'غير مسجّل';}
 function displayTime(value:string|null){const d=value?new Date(value):null;return d&&Number.isFinite(d.getTime())?new Intl.DateTimeFormat('ar-EG',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(d):'لم تتم المزامنة بعد';}
 function phoneValue(v:string){const str=v.replace(/[^\d]/g,'');return str.startsWith('0020')?str.slice(2):str.startsWith('0')?'20'+str.slice(1):str;}
 async function api(user:User,method:'GET'|'POST',kind:string,body?:unknown){
