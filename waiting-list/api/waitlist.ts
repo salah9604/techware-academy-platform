@@ -21,19 +21,35 @@ async function readFile<T>(name:string,fallback:T):Promise<Stored<T>>{
  const text=await new Response(res.stream).text();
  return {value:JSON.parse(text) as T,etag:res.blob.etag};
 }
-async function storeFile(name:string,value:unknown,etag:string|null){
- await put(base+name+'.json',JSON.stringify(value),{
-  access:'private',contentType:'application/json; charset=utf-8',cacheControlMaxAge:60,
-  ...(etag?{allowOverwrite:true,ifMatch:etag}:{allowOverwrite:false})
+// The roster is a replaceable cache of the source Sheet. Its writes must not
+// use an ETag lock: scheduled and admin syncs may overlap without losing edits,
+// because attendance decisions are persisted separately.
+async function storeRoster(value:Snapshot){
+ await put(base+'roster.json',JSON.stringify(value),{
+  access:'private',contentType:'application/json; charset=utf-8',
+  cacheControlMaxAge:60,allowOverwrite:true
  });
 }
-async function updateFile<T>(name:string,fallback:T,transform:(prev:T)=>T){
- for(let attempt=0;attempt<5;attempt++){
+// Decisions/staff are NOT replaceable caches. Keep conditional writes to avoid
+// losing another staff member's edit, with a fresh uncached ETag every attempt.
+async function updateFile<T>(name:'decisions'|'staff',fallback:T,transform:(prev:T)=>T){
+ for(let attempt=0;attempt<8;attempt++){
   const old=await readFile(name,fallback);
-  try{await storeFile(name,transform(old.value),old.etag);return;}
-  catch(error){if(error instanceof BlobPreconditionFailedError||/already exists|precondition|conflict/i.test(String(error)))continue;throw error;}
+  try{
+   await put(base+name+'.json',JSON.stringify(transform(old.value)),{
+    access:'private',contentType:'application/json; charset=utf-8',
+    cacheControlMaxAge:60,
+    ...(old.etag?{allowOverwrite:true,ifMatch:old.etag}:{allowOverwrite:false})
+   });
+   return;
+  }catch(error){
+   const conflict=error instanceof BlobPreconditionFailedError||/already exists|precondition|conflict|412\b|409\b/i.test(String(error));
+   if(!conflict)throw error;
+   // Small bounded backoff reduces collisions when secretaries update together.
+   await new Promise<void>(resolve=>setTimeout(resolve,50*(attempt+1)));
+  }
  }
- throw Error('حصل تعارض في الحفظ. جرّب تاني.');
+ throw Object.assign(Error('فيه تعديل اتسجل في نفس اللحظة. جرّب الحفظ تاني.'),{status:409});
 }
 async function profileFromFirestore(token:string,path:string):Promise<Record<string,unknown>|null>{
  const url='https://firestore.googleapis.com/v1/projects/'+project+'/databases/(default)/documents/'+path.split('/').map(encodeURIComponent).join('/');
@@ -168,7 +184,7 @@ export async function syncRoster(options?:{token?:string;force?:boolean;onlyIfSt
  if(old.value?.entries?.length&&entries.length<old.value.entries.length*.7)
   throw Object.assign(Error('البيانات الجديدة أقل كثيرًا من السجل السابق؛ المزامنة توقفت لحماية السجل.'),{status:409});
  const stamp=new Date().toISOString();
- await updateFile<Snapshot|null>('roster',null,()=>({entries,syncedAt:stamp,source:'Techware courses (Responses)'}));
+ await storeRoster({entries,syncedAt:stamp,source:'Techware courses (Responses)'});
  return {count:entries.length,syncedAt:stamp,skipped:false};
 }
 
