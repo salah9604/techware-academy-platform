@@ -5,7 +5,7 @@ import {firebaseAuth} from './firebase-client';
 import {contactLinks} from './phone';
 import './waiting-list.css';
 
-type Role='checking'|'admin'|'staff'|'denied';
+type Role='checking'|'admin'|'staff'|'denied'|'error';
 type Status='waiting'|'attended'|'removed'|'expired'|'undated';
 type Entry={key:string;name:string;phone:string;whatsapp:string;course:string;age:string;date:string;notes:string;school:string;initialStatus:'waiting'|'attended'|'removed'};
 type Decision={status:'waiting'|'attended'|'removed';actorId:string;updatedAt:string};
@@ -59,7 +59,7 @@ async function api(user:User,method:'GET'|'POST',kind:string,body?:unknown){
   ...(body?{body:JSON.stringify(body)}:{})
  });
  const data=await res.json().catch(()=>({})) as ApiError&Record<string,unknown>;
- if(!res.ok)throw Error(data.error||'تعذر الاتصال بخدمة قائمة الانتظار ('+res.status+')');
+ if(!res.ok){const e=new Error(data.error||'تعذر الاتصال بخدمة قائمة الانتظار ('+res.status+')') as Error&{status?:number};e.status=res.status;throw e;}
  return data;
 }
 const badges:Record<Status,string>={waiting:'في الانتظار',attended:'حضر',removed:'تم الحذف',expired:'انتهت 3 شهور',undated:'تاريخ غير معروف'};
@@ -68,6 +68,8 @@ export default function WaitingListApp(){
  const [user,setUser]=useState<User|null>(null),[authReady,setAuthReady]=useState(false);
  const [role,setRole]=useState<Role>('checking');
  const [autoSync,setAutoSync]=useState(false);
+ const [credentialStatus,setCredentialStatus]=useState('missing');
+ const [authRetry,setAuthRetry]=useState(0);
  const [data,setData]=useState<FullList>({ready:false,syncedAt:null,entries:[],decisions:{}});
  const [loading,setLoading]=useState(false),[busy,setBusy]=useState('');
  const [error,setError]=useState(''),[notice,setNotice]=useState('');
@@ -89,6 +91,7 @@ export default function WaitingListApp(){
    const me=await api(user,'GET','me');
    if(!alive)return;
    setAutoSync(me.autoSyncConfigured===true);
+   setCredentialStatus(String(me.credentialStatus||'missing'));
    const actualRole=me.role==='admin'?'admin':me.role==='staff'?'staff':'denied';
    setRole(actualRole);
    if(actualRole==='denied')return;
@@ -99,10 +102,16 @@ export default function WaitingListApp(){
    if(!alive)return;
    setData(list);const stamp=now();setLastFetchAt(stamp);
    sessionWrite(sourceKey(user.uid),{uid:user.uid,cachedAt:stamp,value:list} satisfies SavedList);
-  })().catch(e=>{if(alive){setRole('denied');setError(String(e.message||e));}})
+  })().catch(e=>{if(alive){
+   const err=e as Error&{status?:number};
+   // A failed API call or invalid Google configuration is NOT evidence of denied access.
+   if(err.status===401||err.status===403)setRole('denied');
+   else setRole(current=>current==='admin'||current==='staff'?current:'error');
+   setError(String(err.message||err));
+  }})
    .finally(()=>{if(alive)setLoading(false);});
   return()=>{alive=false;};
- },[user?.uid]);
+ },[user?.uid,authRetry]);
 
  const cutoff=monthCutoff();
  const classify=(e:Entry):Status=>{
@@ -222,7 +231,8 @@ export default function WaitingListApp(){
     <form onSubmit={loginWithEmail}><label>البريد الإلكتروني<input type="email" dir="ltr" value={email} onChange={e=>setEmail(e.target.value)} placeholder="name@example.com" required/></label><label>كلمة المرور<input type="password" dir="ltr" name="password" required/></label><button type="submit" className="wl-primary" disabled={!!busy}>تسجيل الدخول</button></form>
     <div className="wl-or">أو</div><button className="wl-google" disabled={!!busy} onClick={loginWithGoogle}>الدخول بحساب Google</button>
    </section>:role==='checking'?<section className="wl-center"><div className="wl-loader"/></section>:role==='denied'?
-   <section className="wl-auth"><h1>الحساب غير مفعّل للسكرتارية</h1><p>ابعت كود الحساب ده للإدارة علشان تفعّله. مش محتاج تربط استمارات Google.</p><code dir="ltr" className="wl-uid">{user.uid}</code><button className="wl-google" onClick={()=>navigator.clipboard.writeText(user.uid).then(()=>setNotice('تم نسخ الكود.'))}>نسخ كود الحساب</button></section>:
+   <section className="wl-auth"><h1>الحساب غير مفعّل للسكرتارية</h1><p>ابعت كود الحساب ده للإدارة علشان تفعّله. مش محتاج تربط استمارات Google.</p><code dir="ltr" className="wl-uid">{user.uid}</code><button className="wl-google" onClick={()=>navigator.clipboard.writeText(user.uid).then(()=>setNotice('تم نسخ الكود.'))}>نسخ كود الحساب</button></section>:role==='error'?
+  <section className="wl-auth"><h1>تعذّر الاتصال بالخدمة</h1><p>ده خطأ اتصال أو إعدادات، مش معناه إن حسابك غير مفعّل. جرّب تاني بعد تحديث الصفحة.</p><button className="wl-primary" onClick={()=>{setError('');setAuthRetry(v=>v+1);}}>إعادة المحاولة</button></section>:
   <div className="wl-content">
    <section className="wl-heading"><div><span className="wl-overline">لوحة السكرتارية</span><h1>إدارة قائمة الانتظار</h1><p>التسجيل والحضور من مكان واحد</p></div><button className="wl-refresh" disabled={loading||!!busy} onClick={()=>loadList()}>{loading?'جارٍ التحديث':'↻ تحديث البيانات'}</button></section>
    {role==='admin'&&<section className="wl-connect-panel"><div><strong>{autoSync?'المزامنة التلقائية مفعّلة':'الاتصال التلقائي يحتاج إعدادًا من الإدارة'}</strong><p>{autoSync?'التسجيلات بتتحدث تلقائيًا عند فتح القائمة لو مرّ 15 دقيقة على آخر مزامنة، مع مراجعة يومية مجدولة. السكرتارية مش محتاجة تعمل أي خطوة.':'تم تجهيز التحديث التلقائي، لكنه يحتاج اعتماد خدمة Google مرة واحدة على الخادم. الزر الحالي للإدارة فقط للتحديث اليدوي إلى أن يكتمل الإعداد.'}</p>{data.syncedAt&&<small>آخر مزامنة ناجحة: {displayTime(data.syncedAt)}</small>}</div><button className="wl-primary" disabled={!!busy} onClick={syncSource}>{busy==='sync'?'جارٍ التحديث':'تحديث الآن'}</button></section>}
