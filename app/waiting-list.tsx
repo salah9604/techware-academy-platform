@@ -33,7 +33,7 @@ function formEntry(source:string,id:string,d:DocumentData):Entry|null{
   school:choose(d,['school_name','schoolName','school','المدرسة'])};
 }
 const format=(d:Date|null)=>d?new Intl.DateTimeFormat('ar-EG',{year:'numeric',month:'short',day:'numeric'}).format(d):'التاريخ غير مسجّل';
-function cutoff(now:Date){const d=new Date(now);d.setHours(0,0,0,0);d.setMonth(d.getMonth()-3);return d;}
+function cutoff(now:Date){const d=new Date(now);const day=d.getDate();d.setHours(0,0,0,0);d.setDate(1);d.setMonth(d.getMonth()-3);d.setDate(Math.min(day,new Date(d.getFullYear(),d.getMonth()+1,0).getDate()));return d;}
 const readable=(e:unknown)=>{const code=(e as {code?:string})?.code||'';if(code==='permission-denied')return 'صلاحيات Firebase لم تتفعّل بعد، أو حسابك غير مسموح له بقراءة بيانات الاستمارات.';return e instanceof Error?e.message:'حدث خطأ في الاتصال بقاعدة البيانات.';};
 const canonical=(value:string)=>value.replace(/[\s()+-]/g,'').replace(/^0020/,'0').replace(/^\+20/,'0');
 
@@ -48,6 +48,7 @@ export default function WaitingListApp(){
  const [email,setEmail]=useState(''),[staffUid,setStaffUid]=useState(''),[staffName,setStaffName]=useState('');
  const [staffRows,setStaffRows]=useState<{id:string;name:string;active:boolean}[]>([]);
  const db=useMemo(()=>getFirestore(firebaseAuth().app),[]);
+ useEffect(()=>{const old=document.title;document.title='قائمة الانتظار | Techware Academy';return()=>{document.title=old;};},[]);
  useEffect(()=>onAuthStateChanged(firebaseAuth(),u=>{setUser(u);setAuthReady(true);setRole('checking');},e=>{setAuthReady(true);setError(readable(e));}),[]);
  useEffect(()=>{const timer=setInterval(()=>setNow(new Date()),60_000);return()=>clearInterval(timer);},[]);
  useEffect(()=>{
