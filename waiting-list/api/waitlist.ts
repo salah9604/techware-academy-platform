@@ -109,6 +109,18 @@ export async function credentialHealth():Promise<CredentialStatus|'malformed_key
  try{await importPKCS8(cfg.account.private_key,'RS256');return 'ready';}
  catch{return 'malformed_key';}
 }
+export function credentialFormatHint(){
+ const value=(process.env.GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON||'').trim();
+ // Only structural boolean hints, never portions of the supplied key.
+ return {
+  form:value.startsWith('{')?'object':value.startsWith('"')?'quoted':value.endsWith('.json')?'filename':'other',
+  completeBraces:value.startsWith('{')&&value.endsWith('}'),
+  hasJsonFields:value.includes('"private_key"')&&value.includes('"client_email"'),
+  physicalNewlines:value.includes('\n'),
+  escapedNewlines:value.includes('\\n'),
+  size:value.length<150?'very_short':value.length<1000?'short':value.length>12000?'large':'normal'
+ };
+}
 function serviceAccount():ServiceAccount|null{
  const check=parseCredential();
  if(check.status==='missing')return null;
