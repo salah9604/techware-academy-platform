@@ -153,6 +153,55 @@ service cloud.firestore {
    match /audit/{id}{allow read: if admin();allow create: if member()&&initial()&&validAudit(request.resource.data,id);}
    match /readMarkers/{uid}{allow read: if isOwner(uid);allow create,update: if member()&&isOwner(uid)&&request.resource.data.keys().hasOnly(['readAt'])&&request.resource.data.readAt==request.time;}
   }
+  // Separate, staff-only management of course registration waitlists.
+  // Never change or delete an original registration form from the waitlist UI.
+  function waitingListAdmin(){
+   return isAdmin() || (isLoggedIn()
+    && exists(/databases/$(database)/documents/academyPortal/techware/users/$(request.auth.uid))
+    && get(/databases/$(database)/documents/academyPortal/techware/users/$(request.auth.uid)).data.active == true
+    && get(/databases/$(database)/documents/academyPortal/techware/users/$(request.auth.uid)).data.role == 'admin');
+  }
+  function waitingListStaff(){
+   return waitingListAdmin() || (isLoggedIn()
+    && exists(/databases/$(database)/documents/academyWaitingList/techware/staff/$(request.auth.uid))
+    && get(/databases/$(database)/documents/academyWaitingList/techware/staff/$(request.auth.uid)).data.active == true);
+  }
+  match /academyWaitingList/techware {
+   match /staff/{uid}{
+    allow get: if isOwner(uid) || waitingListAdmin();
+    allow list: if waitingListAdmin();
+    allow create,update: if waitingListAdmin()
+     && request.resource.data.keys().hasOnly(['name','active','updatedAt','createdBy'])
+     && request.resource.data.keys().hasAll(['name','active','updatedAt','createdBy'])
+     && request.resource.data.name is string
+     && request.resource.data.name.size()>0
+     && request.resource.data.name.size()<=100
+     && request.resource.data.active is bool
+     && request.resource.data.createdBy==request.auth.uid
+     && request.resource.data.updatedAt==request.time;
+    allow delete: if false;
+   }
+   match /decisions/{id}{
+    allow get,list: if waitingListStaff();
+    allow create,update: if waitingListStaff()
+     && request.resource.data.keys().hasOnly(['status','actorId','updatedAt'])
+     && request.resource.data.keys().hasAll(['status','actorId','updatedAt'])
+     && request.resource.data.status in ['waiting','attended','removed']
+     && request.resource.data.actorId==request.auth.uid
+     && request.resource.data.updatedAt==request.time;
+    allow delete: if false;
+   }
+  }
+  // Supported source collections; restrict form data to authorised staff.
+  // Existing portal competition registrations are in a separate nested path.
+  match /registrationForms/{id}{allow get,list: if waitingListStaff();}
+  match /formSubmissions/{id}{allow get,list: if waitingListStaff();}
+  match /courseRegistrations/{id}{allow get,list: if waitingListStaff();}
+  match /registrations/{id}{allow get,list: if waitingListStaff();}
+  match /enrollments/{id}{allow get,list: if waitingListStaff();}
+  match /forms/{id}{allow get,list: if waitingListStaff();}
+  match /waitingListSubmissions/{id}{allow get,list: if waitingListStaff();}
+
   match /{document=**}{allow read,write: if false;}
  }
 }
