@@ -233,11 +233,8 @@ export default function WaitingListApp(){
   setBusy('login');setError('');
   try{
    const auth=firebaseAuth();await setPersistence(auth,browserLocalPersistence);
-   const provider=new GoogleAuthProvider();
-   provider.addScope('https://www.googleapis.com/auth/spreadsheets');
-   const result=await signInWithPopup(auth,provider);
-   const token=GoogleAuthProvider.credentialFromResult(result)?.accessToken;
-   if(token){saveGrant(result.user.uid,token);setSheetToken(token);}
+   // Only approved staff are asked for Sheets access from the dashboard.
+   await signInWithPopup(auth,new GoogleAuthProvider());
   }catch(e){setError(readable(e));}
   finally{setBusy('');}
  }
