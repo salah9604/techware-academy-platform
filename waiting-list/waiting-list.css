@@ -26,3 +26,5 @@
 .wl-connect-panel p{margin:4px 0 0;color:#5d7090;font-size:12px}
 .wl-connect-panel button{white-space:nowrap}
 @media(max-width:650px){.wl-connect-panel{align-items:stretch;flex-direction:column;gap:12px}.wl-connect-panel button{width:100%}}
+
+.wl-connect-help{margin-top:10px;font-size:12px;color:#425b83}.wl-connect-help summary{cursor:pointer;font-weight:700;display:list-item}.wl-connect-help p{margin:6px 0;font-size:12px}.wl-connect-help a{display:inline-block;margin-top:3px;color:#1643a4;text-decoration:underline;font-weight:800}
