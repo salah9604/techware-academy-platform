@@ -1,10 +1,6 @@
 name: Deploy Techware Firestore Rules
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/deploy-firestore-rules.yml'
   workflow_dispatch:
     inputs:
       confirm_project:
@@ -22,7 +18,7 @@ concurrency:
 jobs:
   deploy-rules:
     name: Back up and publish Firestore rules only
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.confirm_project == 'techware-instructor') }}
+    if: ${{ github.ref == 'refs/heads/main' && inputs.confirm_project == 'techware-instructor' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
