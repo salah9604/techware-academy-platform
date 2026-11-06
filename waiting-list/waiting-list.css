@@ -37,3 +37,12 @@
 .wl-setup-note{background:#fff8e8;border:1px solid #f0e0b3;color:#7e600e;border-radius:12px;padding:14px 18px;margin-bottom:19px;font-weight:700}
 .wl-connect-panel small{color:#6f839c;display:block;margin-top:7px}
 @media(max-width:650px){.wl-connected-banner{flex-direction:column;align-items:flex-start}}
+
+/* Keep updated student visible at the same place so mobile scroll never jumps. */
+.wl-entry-handled{background:#f7f9fd;border-radius:10px;padding-inline:10px}
+.wl-entry-handled .wl-badge{font-weight:800}
+.wl-delete-confirm{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:7px;width:100%}
+.wl-delete-confirm>span{flex-basis:100%;font-weight:800;font-size:12px;color:#953c45}
+.wl-actions button:focus{scroll-margin-block:60px}
+.wl-actions button{touch-action:manipulation}
+@media(max-width:600px){.wl-entry-handled{padding-inline:8px}.wl-delete-confirm{justify-content:stretch}.wl-delete-confirm>button{flex:1}}
