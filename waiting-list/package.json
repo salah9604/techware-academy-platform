@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "engines": {
-    "node": ">=22.13.0"
+    "node": "22.x"
   },
   "scripts": {
     "build": "vite build",
@@ -14,7 +14,9 @@
   "dependencies": {
     "firebase": "^13.0.0",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "@vercel/blob": "^2.3.1",
+    "jose": "^6.1.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.2",
