@@ -174,13 +174,14 @@ async function handler(req:Request):Promise<Response>{
    return reply({ok:true,...result});
   }
   if(body.action==='mark'){
-   if(typeof body.key!=='string'||!/^sheet__[0-9a-f]{36}$/.test(body.key))return reply({error:'معرّف الطالب غير صحيح.'},400);
+   const key=body.key;
+   if(typeof key!=='string'||!/^sheet__[0-9a-f]{36}$/.test(key))return reply({error:'معرّف الطالب غير صحيح.'},400);
    if(!['waiting','attended','removed'].includes(String(body.status)))return reply({error:'حالة غير صحيحة.'},400);
    const snap=await readFile<Snapshot|null>('roster',null);
-   if(!snap.value?.entries?.some(e=>e.key===body.key))return reply({error:'الطالب غير موجود؛ حدّث القائمة.'},404);
+   if(!snap.value?.entries?.some(e=>e.key===key))return reply({error:'الطالب غير موجود؛ حدّث القائمة.'},404);
    const status=body.status as Decision['status'],updatedAt=new Date().toISOString();
-   await updateFile<Record<string,Decision>>('decisions',{},prev=>({...prev,[body.key]:{status,actorId:person.uid,updatedAt}}));
-   return reply({ok:true,key:body.key,status,updatedAt});
+   await updateFile<Record<string,Decision>>('decisions',{},prev=>({...prev,[key]:{status,actorId:person.uid,updatedAt}}));
+   return reply({ok:true,key,status,updatedAt});
   }
   if(body.action==='staff'){
    if(person.role!=='admin')return reply({error:'الإدارة فقط.'},403);
