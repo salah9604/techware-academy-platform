@@ -1,11 +1,10 @@
-import {credentialHealth,credentialFormatHint,probeGoogleConnection} from './waitlist.js';
+import {credentialHealth,credentialFormatHint} from './waitlist.js';
 
 // Exposes only a categorical configuration state. No keys, credentials,
 // Google Sheet rows, user identifiers, or environment values are returned.
 export async function GET():Promise<Response>{
  const status=await credentialHealth();
- const connection=status==='ready'?await probeGoogleConnection():'not_tested';
- return new Response(JSON.stringify({serviceAccountStatus:status,googleSheetsConnection:connection,...(status==='invalid_json'?{formatHint:credentialFormatHint()}:{})}),{
+ return new Response(JSON.stringify({serviceAccountStatus:status,...(status==='invalid_json'?{formatHint:credentialFormatHint()}:{})}),{
   status:200,
   headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}
  });
