@@ -1,299 +1,213 @@
 'use client';
-import {useEffect,useMemo,useState,type FormEvent} from 'react';
-import {GoogleAuthProvider,browserLocalPersistence,onAuthStateChanged,setPersistence,signInWithEmailAndPassword,signInWithPopup,signOut,reauthenticateWithPopup,linkWithPopup,type User} from 'firebase/auth';
-import {collection,doc,documentId,getDoc,getDocs,getFirestore,limit,orderBy,query,serverTimestamp,setDoc,startAfter,type DocumentData,type QueryDocumentSnapshot} from 'firebase/firestore';
+import {useEffect,useState,type FormEvent} from 'react';
+import {GoogleAuthProvider,browserLocalPersistence,onAuthStateChanged,setPersistence,signInWithEmailAndPassword,signInWithPopup,reauthenticateWithPopup,linkWithPopup,signOut,type User} from 'firebase/auth';
 import {firebaseAuth} from './firebase-client';
 import './waiting-list.css';
 
-type Entry={key:string;source:string;name:string;phone:string;whatsapp:string;course:string;age:string;date:Date|null;notes:string;school:string;docId?:string};
-type Decision={status:'attended'|'removed'|'waiting';updatedAt?:unknown;actorId?:string};
-type Tab='recent'|'all';
-const sourceSpreadsheet='1vZcM6n0eDhDXbi1jNMSpfVWQNLmGBEieqJSgTj_V080';
-const sourceTab="'waiting list'";
-const sheetsEndpoint='https://sheets.googleapis.com/v4/spreadsheets/'+sourceSpreadsheet+'/values/';
-const waitRoot='academyWaitingList/techware';
-// Temporary session storage: same-tab reloads do not require Google authorization again.
-const TOKEN_TTL_MS=45*60*1000;
-const ROWS_TTL_MS=5*60*1000;
-const MANUAL_REFRESH_GAP_MS=60*1000;
-type SavedGrant={uid:string;token:string;expiresAt:number};
-type SavedSnapshot={uid:string;savedAt:number;entries:Entry[];decisions:Record<string,Decision>};
-const grantKey=(uid:string)=>'tw-wait-grant:'+uid;
-const snapshotKey=(uid:string)=>'tw-wait-data:'+uid;
-function readSession<T>(key:string):T|null{try{const value=sessionStorage.getItem(key);return value?JSON.parse(value) as T:null;}catch{return null;}}
-function writeSession(key:string,value:unknown){try{sessionStorage.setItem(key,JSON.stringify(value));}catch{/* Storage may be blocked. */}}
-function removeSession(key:string){try{sessionStorage.removeItem(key);}catch{/* Storage may be blocked. */}}
-function readGrant(uid:string):string{
- const grant=readSession<SavedGrant>(grantKey(uid));
- if(grant?.uid===uid&&grant.expiresAt>Date.now())return grant.token;
- removeSession(grantKey(uid));return '';
+type Role='checking'|'admin'|'staff'|'denied';
+type Status='waiting'|'attended'|'removed'|'expired'|'undated';
+type Entry={key:string;name:string;phone:string;whatsapp:string;course:string;age:string;date:string;notes:string;school:string;initialStatus:'waiting'|'attended'|'removed'};
+type Decision={status:'waiting'|'attended'|'removed';actorId:string;updatedAt:string};
+type Staff={uid:string;name:string;active:boolean};
+type FullList={ready:boolean;syncedAt:string|null;entries:Entry[];decisions:Record<string,Decision>};
+type SavedList={uid:string;cachedAt:number;value:FullList};
+type ApiError={error?:string;googleStatus?:number};
+const CACHE_MS=5*60*1000;
+const UPDATE_GAP_MS=60*1000;
+const GRANT_MS=45*60*1000;
+const sourceKey=(uid:string)=>'tw-wait-list-private-v2:'+uid;
+const grantKey=(uid:string)=>'tw-wait-google-admin:'+uid;
+const now=()=>Date.now();
+function sessionRead<T>(key:string):T|null{try{const raw=sessionStorage.getItem(key);return raw?JSON.parse(raw) as T:null;}catch{return null;}}
+function sessionWrite(key:string,value:unknown){try{sessionStorage.setItem(key,JSON.stringify(value));}catch{/* storage disabled */}}
+function sessionRemove(key:string){try{sessionStorage.removeItem(key);}catch{/* storage disabled */}}
+function cachedList(uid:string):SavedList|null{
+ const cached=sessionRead<SavedList>(sourceKey(uid));
+ return cached?.uid===uid&&now()-cached.cachedAt<CACHE_MS?cached:null;
 }
-function saveGrant(uid:string,token:string){writeSession(grantKey(uid),{uid,token,expiresAt:Date.now()+TOKEN_TTL_MS} satisfies SavedGrant);}
-function readSnapshot(uid:string):SavedSnapshot|null{
- const snapshot=readSession<SavedSnapshot>(snapshotKey(uid));
- if(!snapshot||snapshot.uid!==uid||!Array.isArray(snapshot.entries)||!snapshot.decisions||Date.now()-snapshot.savedAt>ROWS_TTL_MS){removeSession(snapshotKey(uid));return null;}
- return {...snapshot,entries:snapshot.entries.map(e=>({...e,date:safeDate(e.date)}))};
+function monthCutoff(){const d=new Date();const day=d.getDate();d.setDate(1);d.setMonth(d.getMonth()-3);d.setDate(Math.min(day,new Date(d.getFullYear(),d.getMonth()+1,0).getDate()));d.setHours(0,0,0,0);return d;}
+function dateOf(text:string):Date|null{
+ if(!text)return null;
+ const ymd=text.match(/(20\d\d)[\/-](\d{1,2})[\/-](\d{1,2})/);
+ const d=ymd?new Date(+ymd[1],+ymd[2]-1,+ymd[3]):new Date(text);
+ return Number.isFinite(d.getTime())?d:null;
 }
-function saveSnapshot(uid:string,entries:Entry[],decisions:Record<string,Decision>,savedAt:number){writeSession(snapshotKey(uid),{uid,entries,decisions,savedAt} satisfies SavedSnapshot);}
-
-const choose=(d:DocumentData,keys:string[])=>{for(const k of keys){const value=d[k];if(value!==undefined&&value!==null&&String(value).trim())return String(value).trim();}return '';};
-function safeDate(v:unknown):Date|null{
- if(!v)return null;
- if(typeof v==='object'&&v!==null){const o=v as {toDate?:()=>Date;seconds?:number};if(typeof o.toDate==='function')return o.toDate();if(typeof o.seconds==='number')return new Date(o.seconds*1000);}
- if(typeof v==='number')return new Date(v<1e11?v*1000:v);
- const s=String(v).trim();if(/^\d{13}$/.test(s))return new Date(Number(s));if(/^\d{10}$/.test(s))return new Date(Number(s)*1000);
- const ymd=s.match(/(20\d\d)[\/-](\d{1,2})[\/-](\d{1,2})/);if(ymd)return valid(new Date(+ymd[1],+ymd[2]-1,+ymd[3]));
- const egypt=s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);if(egypt)return valid(new Date(+egypt[3],+egypt[2]-1,+egypt[1]));
- return valid(new Date(s));
+function prettyDate(value:string|null){const date=value?dateOf(value):null;return date?new Intl.DateTimeFormat('ar-EG',{year:'numeric',month:'short',day:'numeric'}).format(date):'غير مسجّل';}
+function displayTime(value:string|null){const d=value?new Date(value):null;return d&&Number.isFinite(d.getTime())?new Intl.DateTimeFormat('ar-EG',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(d):'لم تتم المزامنة بعد';}
+function phoneValue(v:string){const str=v.replace(/[^\d]/g,'');return str.startsWith('0020')?str.slice(2):str.startsWith('0')?'20'+str.slice(1):str;}
+async function api(user:User,method:'GET'|'POST',kind:string,body?:unknown){
+ const token=await user.getIdToken();
+ const res=await fetch('/api/waitlist'+(method==='GET'?'?kind='+encodeURIComponent(kind):''),{
+  method,headers:{Authorization:'Bearer '+token,...(body?{'Content-Type':'application/json'}:{})},
+  ...(body?{body:JSON.stringify(body)}:{})
+ });
+ const data=await res.json().catch(()=>({})) as ApiError&Record<string,unknown>;
+ if(!res.ok)throw Error(data.error||'تعذر الاتصال بخدمة قائمة الانتظار ('+res.status+')');
+ return data;
 }
-function valid(d:Date){return Number.isFinite(d.getTime())&&d.getFullYear()>2000&&d.getFullYear()<2100?d:null;}
-function formEntry(source:string,id:string,d:DocumentData):Entry|null{
- const name=choose(d,['student_name','studentName','student_name_ar','name','student','اسم الطالب','اسم الطفل','childName','fullName','full_name']);
- if(!name)return null;
- const dateValue=['createdAt','created_at','submittedAt','submitted_at','submissionDate','submission_date','registrationDate','registeredAt','timestamp','date','form_started_at','created'].map(k=>d[k]).find(x=>x!==undefined&&x!==null&&String(x).trim());
- return {key:source+'__'+id,source,name,
-  phone:choose(d,['parent_phone','parentPhone','guardianPhone','phone','mobile','phoneNumber','رقم ولي الأمر','رقم الهاتف']),
-  whatsapp:choose(d,['whatsapp_phone','whatsappPhone','whatsapp','whatsApp','رقم الواتساب']),
-  course:choose(d,['course_path','coursePath','course','courseName','preferredCourse','course_name','الكورس','اسم الكورس'])||'غير محدد',
-  age:choose(d,['age','studentAge','العمر']),date:safeDate(dateValue),
-  notes:choose(d,['notes','note','message','ملاحظات']),
-  school:choose(d,['school_name','schoolName','school','المدرسة'])};
-}
-function sheetEntry(row:string[],index:number):Entry|null{
- const name=String(row[1]||'').trim();if(!name)return null;
- return {key:'sheet__'+(index+2),source:'sheet',name,
-  date:safeDate(row[0]),age:String(row[2]||''),
-  phone:String(row[4]||''),whatsapp:String(row[5]||''),
-  school:String(row[6]||''),course:String(row[7]||'').trim()||'غير محدد',
-  notes:String(row[8]||''),docId:String(row[10]||'')};
-}
-type SheetsApiError={error?:{status?:string;message?:string;details?:Array<{reason?:string;metadata?:Record<string,string>}>}};
-const sheetsApiSetupUrl='https://console.cloud.google.com/apis/library/sheets.googleapis.com?project=techware-instructor';
-function explainSheetsFailure(status:number,payload:SheetsApiError):Error{
- const details=payload.error?.details||[];
- const reason=details.map(d=>d.reason||'').find(Boolean)||payload.error?.status||'';
- const message=String(payload.error?.message||'').slice(0,350);
- const hint=[reason,message].join(' ').toLowerCase();
- if(status===401)return Error('انتهت صلاحية اتصال Google. اضغط «ربط استمارات Google» مرة تانية.');
- if(status===403){
-  if(/service_disabled|api.*disabled|has not been used|is disabled|enable it by visiting|serviceusage/.test(hint))
-   return Error('Google Sheets API مش مفعّلة في مشروع Firebase الخاص بالأكاديمية (techware-instructor). افتح رابط تفعيل API من أسفل زر الربط، ثم جرّب من جديد.');
-  if(/access_token_scope_insufficient|insufficient authentication scopes|insufficientpermissions|insufficient.*scope/.test(hint))
-   return Error('حساب Google لم يمنح صلاحية قراءة وتعديل Google Sheets المطلوبة. وافق على أذونات الاستمارات عند إعادة الربط.');
-  if(/permission_denied|caller does not have permission|permission to access|not have access|forbidden/.test(hint))
-   return Error('حساب Google اللي اخترته مش عنده صلاحية الوصول لملف تسجيلات Techware. استخدم حساب الملف أو اطلب صلاحية Editor.');
-  return Error('Google رفض الطلب (403). كود السبب: '+(reason||'غير محدد')+(message?' — '+message:'')+'. تأكد من تفعيل Sheets API وصلاحيات حسابك.');
- }
- if(status===404)return Error('ملف التسجيل مش متاح للحساب المستخدم أو الرابط غير صحيح. جرّب حساب المالك.');
- if(status===429)return Error('Google Sheets وصل لحد الطلبات المؤقت. جرّب تحديث البيانات لاحقًا.');
- return Error('تعذّر الاتصال باستمارات Google ('+status+'): '+(message||reason||'خطأ غير معروف'));
-}
-async function sheetsRequest(token:string,path:string){
- const response=await fetch(sheetsEndpoint+encodeURIComponent(path),{headers:{Authorization:'Bearer '+token}});
- const payload=await response.json().catch(()=>({})) as {values?:string[][]}&SheetsApiError;
- if(!response.ok)throw explainSheetsFailure(response.status,payload);
- return payload;
-}
-const format=(d:Date|null)=>d?new Intl.DateTimeFormat('ar-EG',{year:'numeric',month:'short',day:'numeric'}).format(d):'التاريخ غير مسجّل';
-function cutoff(now:Date){const d=new Date(now);const day=d.getDate();d.setHours(0,0,0,0);d.setDate(1);d.setMonth(d.getMonth()-3);d.setDate(Math.min(day,new Date(d.getFullYear(),d.getMonth()+1,0).getDate()));return d;}
-const readable=(e:unknown)=>{const code=(e as {code?:string})?.code||'';if(code==='permission-denied')return 'صلاحيات Firebase لم تتفعّل بعد، أو حسابك غير مسموح له بقراءة بيانات الاستمارات.';return e instanceof Error?e.message:'حدث خطأ في الاتصال بقاعدة البيانات.';};
-const canonical=(value:string)=>value.replace(/[\s()+-]/g,'').replace(/^0020/,'0').replace(/^\+20/,'0');
+const badges:Record<Status,string>={waiting:'في الانتظار',attended:'حضر',removed:'تم الحذف',expired:'انتهت 3 شهور',undated:'تاريخ غير معروف'};
 
 export default function WaitingListApp(){
  const [user,setUser]=useState<User|null>(null),[authReady,setAuthReady]=useState(false);
- const [role,setRole]=useState<'checking'|'admin'|'staff'|'denied'>('checking');
- const [entries,setEntries]=useState<Entry[]>([]),[decisions,setDecisions]=useState<Record<string,Decision>>({});
- const [busy,setBusy]=useState(''),[error,setError]=useState(''),[notice,setNotice]=useState('');
- const [loading,setLoading]=useState(false),[lastSync,setLastSync]=useState<Date|null>(null);
- const [tab,setTab]=useState<Tab>('recent'),[search,setSearch]=useState(''),[course,setCourse]=useState('all'),[status,setStatus]=useState('all');
- const [now,setNow]=useState(new Date()),[reload,setReload]=useState(0);
- const [email,setEmail]=useState(''),[staffUid,setStaffUid]=useState(''),[staffName,setStaffName]=useState('');
- const [staffRows,setStaffRows]=useState<{id:string;name:string;active:boolean}[]>([]);const [staffError,setStaffError]=useState('');
- const [staffOpened,setStaffOpened]=useState(false);
- const [sheetToken,setSheetToken]=useState('');
+ const [role,setRole]=useState<Role>('checking');
+ const [data,setData]=useState<FullList>({ready:false,syncedAt:null,entries:[],decisions:{}});
+ const [loading,setLoading]=useState(false),[busy,setBusy]=useState('');
+ const [error,setError]=useState(''),[notice,setNotice]=useState('');
  const [lastFetchAt,setLastFetchAt]=useState(0);
- const [dataReady,setDataReady]=useState(false);
- const db=useMemo(()=>getFirestore(firebaseAuth().app),[]);
+ const [tab,setTab]=useState<'recent'|'all'>('recent');
+ const [query,setQuery]=useState(''),[course,setCourse]=useState('all'),[status,setStatus]=useState('all');
+ const [email,setEmail]=useState(''),[staffUid,setStaffUid]=useState(''),[staffName,setStaffName]=useState('');
+ const [staff,setStaff]=useState<Staff[]>([]);
+ const [staffLoaded,setStaffLoaded]=useState(false);
+ const [showSourceInfo,setShowSourceInfo]=useState(false);
+ const [clock,setClock]=useState(new Date());
  useEffect(()=>{const old=document.title;document.title='قائمة الانتظار | Techware Academy';return()=>{document.title=old;};},[]);
- useEffect(()=>onAuthStateChanged(firebaseAuth(),u=>{
-  setUser(u);setAuthReady(true);setRole('checking');
-  if(u){setSheetToken(readGrant(u.uid));}
-  else{setSheetToken('');setEntries([]);setDecisions({});setDataReady(false);setLastFetchAt(0);}
- },e=>{setAuthReady(true);setError(readable(e));}),[]);
- useEffect(()=>{const timer=setInterval(()=>setNow(new Date()),60_000);return()=>clearInterval(timer);},[]);
+ useEffect(()=>onAuthStateChanged(firebaseAuth(),u=>{setUser(u);setAuthReady(true);setRole('checking');},e=>{setError(e.message);setAuthReady(true);}),[]);
+ useEffect(()=>{const handle=setInterval(()=>setClock(new Date()),60_000);return()=>clearInterval(handle);},[]);
  useEffect(()=>{
-  if(!user){setRole('checking');return;}
-  let cancelled=false;setRole('checking');setError('');
+  if(!user){setData({ready:false,syncedAt:null,entries:[],decisions:{}});setStaff([]);setRole('checking');return;}
+  let alive=true;setError('');setRole('checking');
   (async()=>{
-   const legacy=await getDoc(doc(db,'users',user.uid)).catch(()=>null);
-   let isAdmin=!!(legacy?.exists()&&['admin','Admin'].includes(legacy.data().role));
-   if(!isAdmin){
-    const portal=await getDoc(doc(db,'academyPortal/techware/users',user.uid)).catch(()=>null);
-    isAdmin=!!(portal?.exists()&&portal.data().active===true&&portal.data().role==='admin');
-   }
-   let isStaff=false;
-   if(!isAdmin){
-    const staff=await getDoc(doc(db,waitRoot+'/staff',user.uid)).catch(()=>null);
-    isStaff=!!(staff?.exists()&&staff.data().active===true);
-   }
-   if(!cancelled)setRole(isAdmin?'admin':isStaff?'staff':'denied');
-  })().catch(e=>{if(!cancelled){setError(readable(e));setRole('denied');}});
-  return()=>{cancelled=true;};
- },[user?.uid,db]);
- useEffect(()=>{
-  if(!user||!['admin','staff'].includes(role)||!sheetToken)return;
-  let cancelled=false;
-  // A reload in the same tab uses a verified five-minute snapshot.
-  if(reload===0){
-   const cached=readSnapshot(user.uid);
-   if(cached){
-    setEntries(cached.entries);setDecisions(cached.decisions);setLastSync(new Date(cached.savedAt));
-    setLastFetchAt(cached.savedAt);setDataReady(true);setLoading(false);return;
-   }
-  }
-  setLoading(true);setError('');
-  (async()=>{
-   // One Sheets GET per sync, without any background polling.
-   const result=await sheetsRequest(sheetToken,sourceTab+'!A2:L2500');
-   if(cancelled)return;
-   const rows=(result.values||[]).map((row,i)=>sheetEntry(row,i)).filter((row):row is Entry=>row!==null);
-   const flags:Record<string,Decision>={};
-   (result.values||[]).forEach((r,i)=>{
-    const key='sheet__'+(i+2);
-    const attended=/^(حضر|نعم|yes|true|تم الحضور|1)$/i.test(String(r[9]||'').trim());
-    const removed=!!String(r[11]||'').trim();
-    if(removed)flags[key]={status:'removed'};
-    else if(attended)flags[key]={status:'attended'};
-   });
-   rows.sort((a,b)=>(b.date?.getTime()||0)-(a.date?.getTime()||0));
-   const stamp=Date.now();
-   setDecisions(flags);setEntries(rows);setDataReady(true);setLastSync(new Date(stamp));
-   setLastFetchAt(stamp);saveSnapshot(user.uid,rows,flags,stamp);
-  })().catch(e=>{
-   if(cancelled)return;
-   setError(readable(e));
-   if((e as Error).message?.includes('انتهت صلاحية')){
-    removeSession(grantKey(user.uid));setSheetToken('');
-   }
-   // A temporary network/API issue does not erase the last loaded list.
-  }).finally(()=>{if(!cancelled)setLoading(false);});
-  return()=>{cancelled=true;};
- },[user?.uid,role,sheetToken,reload]);
- useEffect(()=>{
-  if(role!=='admin'||!staffOpened)return;
-  let active=true;
-  getDocs(collection(db,waitRoot+'/staff'))
-   .then(snap=>{if(active)setStaffRows(snap.docs.map(d=>({id:d.id,name:String(d.data().name||''),active:d.data().active===true})));})
-   .catch(()=>{if(active)setStaffError('إضافة السكرتارية من هنا محتاجة تفعيل قواعد Firebase الخاصة بالنظام.');});
-  return()=>{active=false;};
- },[role,staffOpened,db]);
+   const me=await api(user,'GET','me');
+   if(!alive)return;
+   const actualRole=me.role==='admin'?'admin':me.role==='staff'?'staff':'denied';
+   setRole(actualRole);
+   if(actualRole==='denied')return;
+   const cache=cachedList(user.uid);
+   if(cache){setData(cache.value);setLastFetchAt(cache.cachedAt);return;}
+   setLoading(true);
+   const list=await api(user,'GET','list') as unknown as FullList;
+   if(!alive)return;
+   setData(list);const stamp=now();setLastFetchAt(stamp);
+   sessionWrite(sourceKey(user.uid),{uid:user.uid,cachedAt:stamp,value:list} satisfies SavedList);
+  })().catch(e=>{if(alive){setRole('denied');setError(String(e.message||e));}})
+   .finally(()=>{if(alive)setLoading(false);});
+  return()=>{alive=false;};
+ },[user?.uid]);
 
- const threshold=cutoff(now);
- const classify=(e:Entry)=>{const d=decisions[e.key];return d?.status==='attended'?'attended':d?.status==='removed'?'removed':!e.date?'undated':e.date<threshold?'expired':'waiting';};
- const recent=entries.filter(e=>classify(e)==='waiting');
- const counts=useMemo(()=>({waiting:recent.length,attended:entries.filter(e=>classify(e)==='attended').length,expired:entries.filter(e=>classify(e)==='expired').length,total:entries.length}),[entries,decisions,now]);
- const courses=[...new Set(entries.map(e=>e.course))].sort((a,b)=>a.localeCompare(b,'ar'));
- const filtered=(tab==='recent'?recent:entries).filter(e=>{
-  const hay=(e.name+' '+e.phone+' '+e.whatsapp+' '+e.course+' '+e.school).toLowerCase();
-  const needle=search.trim().toLowerCase();return (!needle||hay.includes(needle)||canonical(hay).includes(canonical(needle)))&&(course==='all'||e.course===course)&&(status==='all'||classify(e)===status);
+ const cutoff=monthCutoff();
+ const classify=(e:Entry):Status=>{
+  const v=data.decisions[e.key]?.status||e.initialStatus;
+  if(v==='attended'||v==='removed')return v;
+  const d=dateOf(e.date);
+  return !d?'undated':d<cutoff?'expired':'waiting';
+ };
+ const waiting=data.entries.filter(e=>classify(e)==='waiting');
+ const attended=data.entries.filter(e=>classify(e)==='attended').length;
+ const expired=data.entries.filter(e=>classify(e)==='expired').length;
+ const courses=[...new Set(data.entries.map(e=>e.course))].sort((a,b)=>a.localeCompare(b,'ar'));
+ const filtered=(tab==='recent'?waiting:data.entries).filter(e=>{
+  const hay=[e.name,e.phone,e.whatsapp,e.course,e.school].join(' ').toLowerCase();
+  return (!query.trim()||hay.includes(query.trim().toLowerCase()))&&(course==='all'||e.course===course)&&(status==='all'||classify(e)===status);
  });
- function refreshData(){
-  if(!sheetToken){setError('لازم تربط Google مرة واحدة علشان تعرض البيانات.');return;}
-  if(loading)return;
-  const elapsed=Date.now()-lastFetchAt;
-  if(dataReady&&elapsed<MANUAL_REFRESH_GAP_MS){
-   setNotice('البيانات محدثة بالفعل. التحديث المتكرر خلال دقيقة مش هيعمل قراءات إضافية.');
-   return;
-  }
-  setNotice('');setReload(n=>n+1);
- }
- async function logout(){
-  if(user){removeSession(grantKey(user.uid));removeSession(snapshotKey(user.uid));}
-  setSheetToken('');setDataReady(false);setEntries([]);setDecisions({});
-  await signOut(firebaseAuth());
- }
- async function connectSheet(){
-  if(!user)return;
-  setBusy('connect');setError('');
+ const remember=(next:FullList)=>{setData(next);if(user)sessionWrite(sourceKey(user.uid),{uid:user.uid,cachedAt:now(),value:next} satisfies SavedList);};
+ async function loadList(force=false){
+  if(!user||loading)return;
+  if(!force&&lastFetchAt&&now()-lastFetchAt<UPDATE_GAP_MS){setNotice('البيانات محدثة بالفعل، مفيش داعي لقراءة جديدة خلال دقيقة.');return;}
+  setLoading(true);setError('');
   try{
-   const provider=new GoogleAuthProvider();
-   provider.addScope('https://www.googleapis.com/auth/spreadsheets');
-   // Use the previously granted Google permissions without forcing consent.
-   const result=user.providerData.some(p=>p.providerId==='google.com')
-     ?await reauthenticateWithPopup(user,provider)
-     :await linkWithPopup(user,provider);
-   const credential=GoogleAuthProvider.credentialFromResult(result);
-   if(!credential?.accessToken)throw Error('لم يتم منح صلاحية Google Sheets. حاول الربط مرة تانية.');
-   saveGrant(user.uid,credential.accessToken);
-   setSheetToken(credential.accessToken);setReload(0);setDataReady(false);
-  }catch(e){setError(readable(e));}
-  finally{setBusy('');}
+   const list=await api(user,'GET','list') as unknown as FullList;
+   remember(list);setLastFetchAt(now());setNotice('تم تحديث البيانات.');
+  }catch(e){setError((e as Error).message);}
+  finally{setLoading(false);}
  }
  async function loginWithGoogle(){
   setBusy('login');setError('');
+  try{const auth=firebaseAuth();await setPersistence(auth,browserLocalPersistence);await signInWithPopup(auth,new GoogleAuthProvider());}
+  catch(e){setError((e as Error).message);}finally{setBusy('');}
+ }
+ async function loginWithEmail(e:FormEvent<HTMLFormElement>){
+  e.preventDefault();setBusy('login');setError('');
+  try{const auth=firebaseAuth();await setPersistence(auth,browserLocalPersistence);const password=String(new FormData(e.currentTarget).get('password')||'');await signInWithEmailAndPassword(auth,email.trim(),password);}
+  catch(e){setError((e as Error).message);}finally{setBusy('');}
+ }
+ async function logout(){
+  if(user){sessionRemove(sourceKey(user.uid));sessionRemove(grantKey(user.uid));}
+  await signOut(firebaseAuth());
+ }
+ async function syncSource(){
+  if(!user||role!=='admin')return;
+  setBusy('sync');setError('');
   try{
-   const auth=firebaseAuth();await setPersistence(auth,browserLocalPersistence);
-   // Only approved staff are asked for Sheets access from the dashboard.
-   await signInWithPopup(auth,new GoogleAuthProvider());
-  }catch(e){setError(readable(e));}
-  finally{setBusy('');}
- }
- async function loginWithEmail(e:FormEvent<HTMLFormElement>){e.preventDefault();setBusy('login');setError('');try{const auth=firebaseAuth();await setPersistence(auth,browserLocalPersistence);const pwd=String(new FormData(e.currentTarget).get('password')||'');await signInWithEmailAndPassword(auth,email.trim(),pwd);}catch(e){setError(readable(e));}finally{setBusy('');}}
- async function mark(e:Entry,next:'attended'|'removed'|'waiting'){
-  if(!user)return;
-  if(next==='removed'&&!window.confirm('هل تريد إزالة '+e.name+' من قائمة الانتظار؟ يمكن استرجاعه من القائمة الكاملة.'))return;
-  setBusy(e.key);setError('');try{
-   if(e.source==='sheet'){
-    if(!sheetToken)throw Error('اربط استمارات Google الأول.');
-    const row=Number(e.key.split('__')[1]);
-    if(!Number.isInteger(row)||row<2)throw Error('رقم السجل غير صحيح.');
-    // Verify row identity before modifying a spreadsheet that may be sorted by another user.
-    const currentRow=await sheetsRequest(sheetToken,sourceTab+'!B'+row+':L'+row);
-    const cells=currentRow.values?.[0]||[];
-    if(String(cells[0]||'').trim()!==e.name||(e.docId&&String(cells[9]||'').trim()!==e.docId))throw Error('ترتيب الاستمارات اتغيّر. حدّث البيانات قبل تعديل الطالب.');
-    const attendance=next==='attended'?'حضر':next==='waiting'?'':String(cells[8]||'');
-    const deleted=next==='removed'?new Date().toISOString():next==='waiting'?'':String(cells[10]||'');
-    const response=await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+sourceSpreadsheet+'/values:batchUpdate',{
-     method:'POST',headers:{Authorization:'Bearer '+sheetToken,'Content-Type':'application/json'},
-     body:JSON.stringify({valueInputOption:'RAW',data:[
-      {range:sourceTab+'!J'+row,values:[[attendance]]},
-      {range:sourceTab+'!L'+row,values:[[deleted]]}
-     ]})
-    });
-    if(!response.ok){
-     const payload=await response.json().catch(()=>({}));
-     throw Error(response.status===403?'حساب Google محتاج صلاحية تعديل ملف الاستمارات علشان يحفظ التغيير.':String(payload?.error?.message||'تعذّر حفظ حالة الطالب.'));
-    }
-    setDecisions(previous=>{
-     const updated={...previous,[e.key]:{status:next} as Decision};
-     saveSnapshot(user.uid,entries,updated,lastFetchAt||Date.now());
-     return updated;
-    });
-   }else{
-    await setDoc(doc(db,waitRoot+'/decisions',e.key),{status:next,actorId:user.uid,updatedAt:serverTimestamp()});
+   const saved=sessionRead<{token:string;expiresAt:number}>(grantKey(user.uid));
+   let googleToken=saved?.expiresAt&&saved.expiresAt>now()?saved.token:'';
+   if(!googleToken){
+    const provider=new GoogleAuthProvider();provider.addScope('https://www.googleapis.com/auth/spreadsheets');
+    const result=user.providerData.some(p=>p.providerId==='google.com')
+      ?await reauthenticateWithPopup(user,provider)
+      :await linkWithPopup(user,provider);
+    googleToken=GoogleAuthProvider.credentialFromResult(result)?.accessToken||'';
+    if(!googleToken)throw Error('لم يتم منح صلاحية استمارات Google.');
+    sessionWrite(grantKey(user.uid),{token:googleToken,expiresAt:now()+GRANT_MS});
    }
-   setNotice(next==='attended'?'تم تسجيل حضور '+e.name:next==='removed'?'تمت إزالة الطالب من الانتظار':'رجع الطالب لقائمة الانتظار');
-  }catch(err){setError(readable(err));}finally{setBusy('');}
+   const outcome=await api(user,'POST','',{action:'sync',token:googleToken});
+   await loadList(true);
+   setNotice('تمت مزامنة '+String(outcome.count||0)+' استمارة. السكرتارية تقدر تشتغل من غير ربط Google.');
+  }catch(e){
+   const message=(e as Error).message||'تعذرت المزامنة.';
+   if(/Google رفض|الصلاحية|انتهت صلاحية/i.test(message))sessionRemove(grantKey(user.uid));
+   setError(message);
+  }finally{setBusy('');}
  }
- async function saveStaff(e:FormEvent<HTMLFormElement>){e.preventDefault();if(!user||role!=='admin')return;
-  const uid=staffUid.trim();if(!/^[A-Za-z0-9_-]{8,160}$/.test(uid)){setError('اكتب Firebase UID صحيح للموظف.');return;}
-  setBusy('staff');setError('');try{const name=staffName.trim().slice(0,100)||'سكرتارية';await setDoc(doc(db,waitRoot+'/staff',uid),{name,active:true,updatedAt:serverTimestamp(),createdBy:user.uid});setStaffRows(prev=>[...prev.filter(item=>item.id!==uid),{id:uid,name,active:true}]);setStaffName('');setStaffUid('');setNotice('تم تفعيل حساب السكرتارية.');}catch(err){setError(readable(err));}finally{setBusy('');}
+ async function mark(e:Entry,next:'attended'|'removed'|'waiting'){
+  if(!user||busy)return;
+  if(next==='removed'&&!window.confirm('حذف '+e.name+' من الانتظار؟ السجل الأصلي مش هيتمسح.'))return;
+  setBusy(e.key);setError('');
+  try{
+   await api(user,'POST','',{action:'mark',key:e.key,status:next});
+   const updated={...data,decisions:{...data.decisions,[e.key]:{status:next,actorId:user.uid,updatedAt:new Date().toISOString()}}};
+   remember(updated);
+   setNotice(next==='attended'?'تم تسجيل حضور الطالب.':next==='removed'?'تمت إزالته من الانتظار.':'تم إرجاع الطالب للانتظار.');
+  }catch(err){setError((err as Error).message);}finally{setBusy('');}
  }
- async function toggleStaff(row:{id:string;name:string;active:boolean}){if(!user||role!=='admin')return;setBusy(row.id);setError('');try{await setDoc(doc(db,waitRoot+'/staff',row.id),{name:row.name,active:!row.active,updatedAt:serverTimestamp(),createdBy:user.uid});setStaffRows(prev=>prev.map(item=>item.id===row.id?{...item,active:!row.active}:item));}catch(err){setError(readable(err));}finally{setBusy('');}}
- const badges:Record<string,string>={waiting:'في الانتظار',attended:'حضر',removed:'تم الحذف',expired:'انتهت 3 شهور',undated:'تاريخ غير معروف'};
- return <main className="wl-page" dir="rtl">
+ async function loadStaff(){
+  if(!user||role!=='admin'||staffLoaded)return;
+  setBusy('staff-read');setError('');
+  try{const v=await api(user,'GET','staff');setStaff((v.staff||[]) as Staff[]);setStaffLoaded(true);}
+  catch(e){setError((e as Error).message);}finally{setBusy('');}
+ }
+ async function saveStaff(event:FormEvent<HTMLFormElement>){
+  event.preventDefault();if(!user||role!=='admin')return;
+  setBusy('staff-save');setError('');
+  try{
+   const answer=await api(user,'POST','',{action:'staff',uid:staffUid.trim(),name:staffName.trim()||'سكرتارية',active:true});
+   const row:Staff={uid:String(answer.uid),name:String(answer.name),active:true};
+   setStaff(existing=>[...existing.filter(r=>r.uid!==row.uid),row]);
+   setStaffUid('');setStaffName('');setNotice('تم تفعيل حساب السكرتارية.');
+  }catch(e){setError((e as Error).message);}finally{setBusy('');}
+ }
+ async function toggleStaff(staffRow:Staff){
+  if(!user||role!=='admin')return;
+  setBusy(staffRow.uid);setError('');
+  try{
+   await api(user,'POST','',{action:'staff',uid:staffRow.uid,name:staffRow.name,active:!staffRow.active});
+   setStaff(existing=>existing.map(r=>r.uid===staffRow.uid?{...r,active:!r.active}:r));
+  }catch(e){setError((e as Error).message);}finally{setBusy('');}
+ }
+ const count=(n:number)=>data.ready?n.toLocaleString('ar-EG'):'—';
+ return <main dir="rtl" className="wl-page">
   <header className="wl-header"><div className="wl-brand"><span className="wl-symbol">T</span><div><strong>TECHWARE <span>ACADEMY</span></strong><small>Waiting List Management</small></div></div><div className="wl-header-actions">{user&&<><span className="wl-user">{user.displayName||user.email}</span><button className="wl-out" onClick={logout}>خروج</button></>}</div></header>
-  {!authReady?<section className="wl-center"><div className="wl-loader"/><p>جاري تجهيز الصفحة</p></section>:!user?<section className="wl-auth"><span className="wl-auth-icon">T</span><h1>قائمة انتظار Techware</h1><p>لوحة خاصة بالسكرتارية والإدارة لمتابعة طلبات التسجيل.</p><form onSubmit={loginWithEmail}><label>البريد الإلكتروني<input type="email" dir="ltr" value={email} onChange={e=>setEmail(e.target.value)} placeholder="name@example.com" required/></label><label>كلمة المرور<input type="password" name="password" dir="ltr" placeholder="كلمة المرور" required/></label><button type="submit" className="wl-primary" disabled={!!busy}>تسجيل الدخول</button></form><div className="wl-or">أو</div><button className="wl-google" type="button" onClick={loginWithGoogle} disabled={!!busy}>المتابعة باستخدام Google</button></section>:role==='checking'?<section className="wl-center"><div className="wl-loader"/><p>التحقق من صلاحيات الحساب...</p></section>:role==='denied'?<section className="wl-auth"><h1>الحساب غير مصرح له بالدخول</h1><p>اطلب من الإدارة تفعيل حسابك كموظف سكرتارية.</p><code dir="ltr" className="wl-uid">{user.uid}</code><button className="wl-google" onClick={()=>navigator.clipboard.writeText(user.uid).then(()=>setNotice('تم نسخ UID'))}>نسخ رقم الحساب</button></section>:<div className="wl-content">
-   <section className="wl-heading"><div><span className="wl-overline">لوحة السكرتارية</span><h1>إدارة قائمة الانتظار</h1><p>متابعة طلبات التسجيل والحضور من مكان واحد</p></div><button className="wl-refresh" onClick={refreshData} disabled={loading||!sheetToken}>↻ تحديث البيانات</button></section>
-   <section className="wl-connect-panel"><div><strong>{dataReady?'متصل باستمارات Techware':'ربط ملف تسجيلات Techware'}</strong><p>{dataReady?'البيانات بتتقرأ من تبويب waiting list في ملف الأكاديمية.':'استخدم حساب Google المصرّح له بالوصول لملف تسجيلات Techware.'}</p><details className="wl-connect-help"><summary>إعدادات الاتصال لو ظهر خطأ 403</summary><p>قد يحتاج مشروع Firebase لتفعيل Google Sheets API مرة واحدة. ده لا يفتح الملف للعامة.</p><a href={sheetsApiSetupUrl} target="_blank" rel="noopener noreferrer">فتح إعدادات Google Sheets API</a></details></div>{sheetToken?<span className="wl-connected" role="status">✓ حساب Google متصل</span>:<button className="wl-primary" type="button" onClick={connectSheet} disabled={!!busy}>{busy==='connect'?'جاري الربط...':'ربط استمارات Google'}</button>}</section>
-   <section className="wl-stats"><div><span>في الانتظار</span><strong>{dataReady?counts.waiting:'—'}</strong><small>آخر 3 شهور</small></div><div><span>حضروا</span><strong>{dataReady?counts.attended:'—'}</strong><small>تم تأكيد حضورهم</small></div><div><span>انتهت المدة</span><strong>{dataReady?counts.expired:'—'}</strong><small>مستبعدون تلقائيًا</small></div><div><span>إجمالي الاستمارات</span><strong>{dataReady?counts.total:'—'}</strong><small>السجل الكامل</small></div></section>
-   <section className="wl-panel"><div className="wl-tabs"><button className={tab==='recent'?'selected':''} onClick={()=>{setTab('recent');setStatus('all');}}>قائمة آخر 3 شهور <b>{dataReady?counts.waiting:'—'}</b></button><button className={tab==='all'?'selected':''} onClick={()=>setTab('all')}>القائمة الكاملة <b>{dataReady?counts.total:'—'}</b></button></div>
-    <div className="wl-filters"><input aria-label="البحث" value={search} onChange={e=>setSearch(e.target.value)} placeholder="ابحث باسم الطالب أو رقم ولي الأمر..." /><select aria-label="الكورس" value={course} onChange={e=>setCourse(e.target.value)}><option value="all">كل الكورسات</option>{courses.map(c=><option key={c}>{c}</option>)}</select>{tab==='all'&&<select aria-label="الحالة" value={status} onChange={e=>setStatus(e.target.value)}><option value="all">كل الحالات</option>{Object.entries(badges).map(([k,v])=><option value={k} key={k}>{v}</option>)}</select>}</div>
-    {!dataReady?<div className="wl-state"><strong>اربط الاستمارات لعرض بيانات الطلاب</strong><p>اضغط «ربط استمارات Google» واختر الحساب اللي عنده صلاحية على الملف.</p></div>:loading?<div className="wl-state"><div className="wl-loader"/><p>تحميل الاستمارات...</p></div>:filtered.length===0?<div className="wl-state"><strong>لا توجد طلبات مطابقة</strong><p>{counts.total===0?'لم تُعرض استمارات بعد. راجع اتصال قاعدة البيانات ومصدر التسجيل.':'جرّب تغيير البحث أو الفلاتر.'}</p></div>:<div className="wl-list">{filtered.map(e=>{const state=classify(e),w=e.whatsapp||e.phone;return <article className="wl-entry" key={e.key}><div className="wl-entry-main"><div className="wl-avatar">{e.name.charAt(0)}</div><div><div className="wl-name">{e.name}<span className={'wl-badge '+state}>{badges[state]}</span></div><div className="wl-meta"><span>{e.course}</span>{e.age&&<span>العمر: {e.age}</span>}<span>تسجيل: {format(e.date)}</span></div></div></div><div className="wl-info"><span dir="ltr">{e.phone||'لا يوجد رقم'}</span>{w&&<a href={'https://wa.me/'+(canonical(w).replace(/^0/,'20'))} target="_blank" rel="noreferrer">واتساب</a>}{e.school&&<span>{e.school}</span>}{e.notes&&<details><summary>ملاحظات</summary><p>{e.notes}</p></details>}</div><div className="wl-actions">{state==='waiting'?<><button className="wl-attend" disabled={!!busy} onClick={()=>mark(e,'attended')}>تسجيل حضور</button><button className="wl-remove" disabled={!!busy} onClick={()=>mark(e,'removed')}>حذف من الانتظار</button></>:<button className="wl-restore" disabled={!!busy||state==='expired'} onClick={()=>mark(e,'waiting')}>{state==='expired'?'انتهت صلاحية الطلب':'إرجاع للانتظار'}</button>}</div></article>})}</div>}
-    <footer className="wl-footer"><span>{dataReady?filtered.length:'—'} طلب ظاهر</span><span>{lastSync?'آخر مزامنة: '+new Intl.DateTimeFormat('ar-EG',{hour:'2-digit',minute:'2-digit'}).format(lastSync):'—'}</span></footer>
+  {!authReady?<section className="wl-center"><div className="wl-loader"/></section>:!user?
+   <section className="wl-auth"><span className="wl-auth-icon">T</span><h1>قائمة انتظار Techware</h1><p>دخول موظفي السكرتارية والإدارة.</p>
+    <form onSubmit={loginWithEmail}><label>البريد الإلكتروني<input type="email" dir="ltr" value={email} onChange={e=>setEmail(e.target.value)} placeholder="name@example.com" required/></label><label>كلمة المرور<input type="password" dir="ltr" name="password" required/></label><button type="submit" className="wl-primary" disabled={!!busy}>تسجيل الدخول</button></form>
+    <div className="wl-or">أو</div><button className="wl-google" disabled={!!busy} onClick={loginWithGoogle}>الدخول بحساب Google</button>
+   </section>:role==='checking'?<section className="wl-center"><div className="wl-loader"/></section>:role==='denied'?
+   <section className="wl-auth"><h1>الحساب غير مفعّل للسكرتارية</h1><p>ابعت كود الحساب ده للإدارة علشان تفعّله. مش محتاج تربط استمارات Google.</p><code dir="ltr" className="wl-uid">{user.uid}</code><button className="wl-google" onClick={()=>navigator.clipboard.writeText(user.uid).then(()=>setNotice('تم نسخ الكود.'))}>نسخ كود الحساب</button></section>:
+  <div className="wl-content">
+   <section className="wl-heading"><div><span className="wl-overline">لوحة السكرتارية</span><h1>إدارة قائمة الانتظار</h1><p>التسجيل والحضور من مكان واحد</p></div><button className="wl-refresh" disabled={loading||!!busy} onClick={()=>loadList()}>{loading?'جارٍ التحديث':'↻ تحديث البيانات'}</button></section>
+   {role==='admin'&&<section className="wl-connect-panel"><div><strong>مزامنة الاستمارات (للإدارة فقط)</strong><p>الإدارة بتحدّث البيانات من ملف التسجيل؛ السكرتارية مش محتاجة Google ولا أي خطوات ربط.</p>{data.syncedAt&&<small>آخر مزامنة: {displayTime(data.syncedAt)}</small>}</div><button className="wl-primary" disabled={!!busy} onClick={syncSource}>{busy==='sync'?'جارٍ الربط والمزامنة':'مزامنة مع Google'}</button></section>}
+   {role==='staff'&&<div className="wl-connected-banner"><strong>حساب السكرتارية متصل</strong><span>يمكنك متابعة الطلاب وتسجيل الحضور مباشرة.</span></div>}
+   {!data.ready&&<div className="wl-setup-note">{role==='admin'?'لم تتم المزامنة الأولى بعد. اضغط «مزامنة مع Google» علشان تظهر بيانات الاستمارات للسكرتارية.':'الإدارة لم تنفّذ المزامنة الأولى للاستـمارات بعد. بمجرد تنفيذها هتظهر القائمة هنا تلقائيًا عند التحديث.'}</div>}
+   <section className="wl-stats"><div><span>في الانتظار</span><strong>{count(waiting.length)}</strong><small>آخر 3 شهور</small></div><div><span>حضروا</span><strong>{count(attended)}</strong><small>تم تأكيد حضورهم</small></div><div><span>انتهت المدة</span><strong>{count(expired)}</strong><small>مستبعدون من القائمة الحديثة</small></div><div><span>إجمالي الاستمارات</span><strong>{count(data.entries.length)}</strong><small>السجل الكامل</small></div></section>
+   <section className="wl-panel">
+    <div className="wl-tabs"><button className={tab==='recent'?'selected':''} onClick={()=>{setTab('recent');setStatus('all');}}>قائمة آخر 3 شهور <b>{count(waiting.length)}</b></button><button className={tab==='all'?'selected':''} onClick={()=>setTab('all')}>القائمة الكاملة <b>{count(data.entries.length)}</b></button></div>
+    <div className="wl-filters"><input aria-label="بحث" value={query} onChange={e=>setQuery(e.target.value)} placeholder="ابحث باسم الطالب أو رقم ولي الأمر..."/><select aria-label="الكورس" value={course} onChange={e=>setCourse(e.target.value)}><option value="all">كل الكورسات</option>{courses.map(c=><option key={c} value={c}>{c}</option>)}</select>{tab==='all'&&<select aria-label="حالة الطالب" value={status} onChange={e=>setStatus(e.target.value)}><option value="all">كل الحالات</option>{Object.entries(badges).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select>}</div>
+    {loading&&!data.ready?<div className="wl-state"><div className="wl-loader"/></div>:!data.ready?<div className="wl-state"><strong>قائمة الانتظار لم تُزامَن بعد</strong><p>مطلوب تنفيذ المزامنة الأولى من حساب الإدارة.</p></div>:filtered.length===0?<div className="wl-state"><strong>لا توجد نتائج مطابقة</strong><p>جرّب تغيير الفلاتر.</p></div>:
+    <div className="wl-list">{filtered.map(e=>{const state=classify(e),wa=e.whatsapp||e.phone;return <article className="wl-entry" key={e.key}><div className="wl-entry-main"><div className="wl-avatar">{e.name.charAt(0)}</div><div><div className="wl-name">{e.name}<span className={'wl-badge '+state}>{badges[state]}</span></div><div className="wl-meta"><span>{e.course}</span>{e.age&&<span>العمر: {e.age}</span>}<span>تسجيل: {prettyDate(e.date)}</span></div></div></div><div className="wl-info"><span dir="ltr">{e.phone||'لا يوجد رقم'}</span>{wa&&<a href={'https://wa.me/'+phoneValue(wa)} target="_blank" rel="noopener noreferrer">واتساب</a>}{e.school&&<span>{e.school}</span>}{e.notes&&<details><summary>ملاحظات</summary><p>{e.notes}</p></details>}</div><div className="wl-actions">{state==='waiting'?<><button className="wl-attend" disabled={!!busy} onClick={()=>mark(e,'attended')}>تسجيل حضور</button><button className="wl-remove" disabled={!!busy} onClick={()=>mark(e,'removed')}>حذف من الانتظار</button></>:<button className="wl-restore" disabled={!!busy||state==='expired'} onClick={()=>mark(e,'waiting')}>{state==='expired'?'انتهت صلاحية الطلب':'إرجاع للانتظار'}</button>}</div></article>})}</div>}
+    <footer className="wl-footer"><span>{filtered.length.toLocaleString('ar-EG')} طلب ظاهر</span><span>آخر مزامنة استمارات: {displayTime(data.syncedAt)}</span></footer>
    </section>
-   {role==='admin'&&<details className="wl-staff" onToggle={e=>setStaffOpened(e.currentTarget.open)}><summary>إدارة حسابات السكرتارية</summary><div className="wl-staff-body"><p>الموظف يسجّل دخول بحسابه، ويرسل UID الظاهر له لتفعيل الصلاحية.</p><form onSubmit={saveStaff}><input dir="ltr" value={staffUid} onChange={e=>setStaffUid(e.target.value)} placeholder="Firebase UID" required/><input value={staffName} onChange={e=>setStaffName(e.target.value)} placeholder="اسم الموظف"/><button type="submit" className="wl-primary" disabled={!!busy}>تفعيل الموظف</button></form>{staffRows.map(row=><div key={row.id} className="wl-staff-row"><span>{row.name} <small dir="ltr">{row.id}</small></span><button onClick={()=>toggleStaff(row)} disabled={!!busy}>{row.active?'إيقاف الصلاحية':'تفعيل الصلاحية'}</button></div>)}{staffError&&<p role="status">{staffError}</p>}</div></details>}
-   <p className="wl-privacy">الطلبات التي مرّ عليها 3 شهور تُستبعد تلقائيًا من الانتظار، وتظل في السجل الكامل للحفاظ على تاريخ التسجيل. الحذف اليدوي يزيل الطلب من الانتظار فقط ولا يمسح الاستمارة الأصلية.</p>
+   {role==='admin'&&<details className="wl-staff" onToggle={e=>{if(e.currentTarget.open)loadStaff();}}><summary>إدارة حسابات السكرتارية</summary><div className="wl-staff-body"><p>الموظف يسجل بحسابه العادي ويبعت كود الحساب للإدارة. فعّله هنا مرة واحدة فقط.</p><form onSubmit={saveStaff}><input dir="ltr" value={staffUid} onChange={e=>setStaffUid(e.target.value)} placeholder="كود حساب Firebase" required/><input value={staffName} onChange={e=>setStaffName(e.target.value)} placeholder="اسم الموظف"/><button className="wl-primary" type="submit" disabled={!!busy}>تفعيل الحساب</button></form>{staff.map(r=><div className="wl-staff-row" key={r.uid}><span>{r.name}<small dir="ltr">{r.uid}</small></span><button onClick={()=>toggleStaff(r)} disabled={!!busy}>{r.active?'إيقاف الصلاحية':'تفعيل الصلاحية'}</button></div>)}</div></details>}
+   <p className="wl-privacy">حالات الحضور والحذف تُحفظ داخل نظام الانتظار الخاص، من غير مسح بيانات استمارة الطالب الأصلية. الطلبات الأقدم من 3 شهور تُستبعد تلقائيًا من قائمة الانتظار الحديثة.</p>
   </div>}
   {(error||notice)&&<div role={error?'alert':'status'} className={'wl-toast '+(error?'bad':'good')}><span>{error||notice}</span><button onClick={()=>{setError('');setNotice('');}} aria-label="إغلاق">×</button></div>}
  </main>;
