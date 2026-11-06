@@ -17,16 +17,29 @@ Independent internal Vercel site: https://techware-waiting-list.vercel.app
 - Data is never committed into the GitHub repository or included in client bundles.
 - Existing academy teaching platform remains separate and unchanged.
 
-## Data freshness and known limitations
-- The source Google Sheet is read only when an administrator triggers **مزامنة مع Google**. **New web registrations do not appear automatically until an admin syncs**; this is a conscious limitation until a secure server-side Google service account or Apps Script sync is configured.
-- The attendance/removal status changes made in this site are saved **only in this site's private decision ledger**, not back into the source Google Sheet.
-- Entries older than three calendar months are computed as expired in the active waiting list and remain in the complete archive. Original form records are never physically deleted.
-- Client stores a short-lived (five-minute) authenticated session snapshot; server functions verify user permissions for every request.
-- The administrator should periodically refresh the source roster (e.g., at the beginning of each workday) until automation is provisioned.
-- For always-current synchronized registrations, arrange a secure service-account/Apps Script integration with the verified original source. Never publish a service-account secret or make the Sheet public.
+## Auto-sync and source consistency
+- **Automatic read on access:** An authenticated list request refreshes Google Sheets when the last successful sync is older than 15 minutes, *provided a server-side service account is configured*. This never asks the secretary to link Google.
+- **Scheduled safety-net:** Vercel Cron calls `/api/refresh` daily at 04:00 UTC. Its Authorization header must match the secret `CRON_SECRET`, which is configured for Production.
+- **Efficient reads:** Each automatic sync performs one Google Sheets range read and saves the roster in private Vercel Blob. Browser session snapshots last five minutes. No per-student reads or background polling by secretaries.
+- **Source records remain read-only**; attendance/removal decisions live in the site's private ledger and survive roster refreshes. They are not written back to the Google Sheet.
+- Entries older than three calendar months leave the active waiting list but remain in the full archive. No automatic physical deletion.
+- Google Sheets failures do not replace the previously synchronized records; admin can see the last successful sync.
+- If the credentials below are not configured, automatic syncing is **not active**; the admin-only manual Google authorization remains a fallback.
+
+## One-time permanent Google service account configuration (admin)
+1. In Google Cloud Console for project `techware-instructor`, enable Google Sheets API, create a service account dedicated to waiting-list synchronization, then generate a JSON key (or use a managed identity flow if company policy forbids keys). Never commit the key to GitHub or paste it in chat.
+2. In the Google Sheet `Techware courses (Responses)`, use Share to add that service account's `client_email` as **Viewer**. Only the `waiting list` tab is read by this app, though spreadsheet-wide Viewer access applies.
+3. In Vercel > Project `techware-waiting-list` > Settings > Environment Variables, add `GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON` as a **Sensitive** variable for Production, with the complete JSON service account key as its value. Redeploy the production project for the new environment variable to take effect.
+4. `CRON_SECRET` is already configured and must never be shared. Check the site's admin status banner: **المزامنة التلقائية مفعّلة**. An admin can click `تحديث الآن` for the first load; thereafter requests and cron sync without a Google popup.
+
+## Limits
+- Cron is configured once daily to remain compatible with Vercel Hobby limits. During working hours, the first permitted request after the 15-minute data-freshness threshold triggers a refresh automatically. There is no continuous polling when nobody visits the site.
+- The source spreadsheet is fetched as a single bounded `A2:L10000` range, and the server protects the previous roster from empty or suspiciously truncated updates.
+
 
 ## Setup
 - Vercel project `techware-waiting-list`, root directory `waiting-list`.
+- `CRON_SECRET` is configured for production; `GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON` still requires the one-time administrative key.
 - Private Vercel Blob store attached to this project. The `BLOB_READ_WRITE_TOKEN` environment variable must be available to server functions only.
 - All `/api/waitlist` requests are authenticated on the server with verified Firebase ID tokens.
 - No separate Firebase Firestore security rule deployment is required for the private roster/decision ledger; existing user profile permissions are still used for admin verification.
