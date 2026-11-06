@@ -43,15 +43,32 @@ function sheetEntry(row:string[],index:number):Entry|null{
   school:String(row[6]||''),course:String(row[7]||'').trim()||'غير محدد',
   notes:String(row[8]||''),docId:String(row[10]||'')};
 }
+type SheetsApiError={error?:{status?:string;message?:string;details?:Array<{reason?:string;metadata?:Record<string,string>}>}};
+const sheetsApiSetupUrl='https://console.cloud.google.com/apis/library/sheets.googleapis.com?project=techware-instructor';
+function explainSheetsFailure(status:number,payload:SheetsApiError):Error{
+ const details=payload.error?.details||[];
+ const reason=details.map(d=>d.reason||'').find(Boolean)||payload.error?.status||'';
+ const message=String(payload.error?.message||'').slice(0,350);
+ const hint=[reason,message].join(' ').toLowerCase();
+ if(status===401)return Error('انتهت صلاحية اتصال Google. اضغط «ربط استمارات Google» مرة تانية.');
+ if(status===403){
+  if(/service_disabled|api.*disabled|has not been used|is disabled|enable it by visiting|serviceusage/.test(hint))
+   return Error('Google Sheets API مش مفعّلة في مشروع Firebase الخاص بالأكاديمية (techware-instructor). افتح رابط تفعيل API من أسفل زر الربط، ثم جرّب من جديد.');
+  if(/access_token_scope_insufficient|insufficient authentication scopes|insufficientpermissions|insufficient.*scope/.test(hint))
+   return Error('حساب Google لم يمنح صلاحية قراءة وتعديل Google Sheets المطلوبة. وافق على أذونات الاستمارات عند إعادة الربط.');
+  if(/permission_denied|caller does not have permission|permission to access|not have access|forbidden/.test(hint))
+   return Error('حساب Google اللي اخترته مش عنده صلاحية الوصول لملف تسجيلات Techware. استخدم حساب الملف أو اطلب صلاحية Editor.');
+  return Error('Google رفض الطلب (403). كود السبب: '+(reason||'غير محدد')+(message?' — '+message:'')+'. تأكد من تفعيل Sheets API وصلاحيات حسابك.');
+ }
+ if(status===404)return Error('ملف التسجيل مش متاح للحساب المستخدم أو الرابط غير صحيح. جرّب حساب المالك.');
+ if(status===429)return Error('Google Sheets وصل لحد الطلبات المؤقت. جرّب تحديث البيانات لاحقًا.');
+ return Error('تعذّر الاتصال باستمارات Google ('+status+'): '+(message||reason||'خطأ غير معروف'));
+}
 async function sheetsRequest(token:string,path:string){
  const response=await fetch(sheetsEndpoint+encodeURIComponent(path),{headers:{Authorization:'Bearer '+token}});
- const payload=await response.json().catch(()=>({}));
- if(!response.ok){
-  if(response.status===401)throw Error('انتهت صلاحية الاتصال بـGoogle. اضغط ربط الاستمارات مرة تانية.');
-  if(response.status===403)throw Error('حساب Google ده مش مسموح له بقراءة ملف استمارات Techware، أو Google Sheets API مش مفعّلة.');
-  throw Error(String(payload?.error?.message||'تعذّر الاتصال باستمارات Google.'));
- }
- return payload as {values?:string[][]};
+ const payload=await response.json().catch(()=>({})) as {values?:string[][]}&SheetsApiError;
+ if(!response.ok)throw explainSheetsFailure(response.status,payload);
+ return payload;
 }
 const format=(d:Date|null)=>d?new Intl.DateTimeFormat('ar-EG',{year:'numeric',month:'short',day:'numeric'}).format(d):'التاريخ غير مسجّل';
 function cutoff(now:Date){const d=new Date(now);const day=d.getDate();d.setHours(0,0,0,0);d.setDate(1);d.setMonth(d.getMonth()-3);d.setDate(Math.min(day,new Date(d.getFullYear(),d.getMonth()+1,0).getDate()));return d;}
@@ -185,7 +202,7 @@ export default function WaitingListApp(){
   <header className="wl-header"><div className="wl-brand"><span className="wl-symbol">T</span><div><strong>TECHWARE <span>ACADEMY</span></strong><small>Waiting List Management</small></div></div><div className="wl-header-actions">{user&&<><span className="wl-user">{user.displayName||user.email}</span><button className="wl-out" onClick={()=>signOut(firebaseAuth())}>خروج</button></>}</div></header>
   {!authReady?<section className="wl-center"><div className="wl-loader"/><p>جاري تجهيز الصفحة</p></section>:!user?<section className="wl-auth"><span className="wl-auth-icon">T</span><h1>قائمة انتظار Techware</h1><p>لوحة خاصة بالسكرتارية والإدارة لمتابعة طلبات التسجيل.</p><form onSubmit={loginWithEmail}><label>البريد الإلكتروني<input type="email" dir="ltr" value={email} onChange={e=>setEmail(e.target.value)} placeholder="name@example.com" required/></label><label>كلمة المرور<input type="password" name="password" dir="ltr" placeholder="كلمة المرور" required/></label><button type="submit" className="wl-primary" disabled={!!busy}>تسجيل الدخول</button></form><div className="wl-or">أو</div><button className="wl-google" type="button" onClick={loginWithGoogle} disabled={!!busy}>المتابعة باستخدام Google</button></section>:role==='checking'?<section className="wl-center"><div className="wl-loader"/><p>التحقق من صلاحيات الحساب...</p></section>:role==='denied'?<section className="wl-auth"><h1>الحساب غير مصرح له بالدخول</h1><p>اطلب من الإدارة تفعيل حسابك كموظف سكرتارية.</p><code dir="ltr" className="wl-uid">{user.uid}</code><button className="wl-google" onClick={()=>navigator.clipboard.writeText(user.uid).then(()=>setNotice('تم نسخ UID'))}>نسخ رقم الحساب</button></section>:<div className="wl-content">
    <section className="wl-heading"><div><span className="wl-overline">لوحة السكرتارية</span><h1>إدارة قائمة الانتظار</h1><p>متابعة طلبات التسجيل والحضور من مكان واحد</p></div><button className="wl-refresh" onClick={()=>setReload(v=>v+1)} disabled={loading}>↻ تحديث البيانات</button></section>
-   <section className="wl-connect-panel"><div><strong>{dataReady?'متصل باستمارات Techware':'ربط ملف تسجيلات Techware'}</strong><p>{dataReady?'يتم عرض الطلبات من تبويب waiting list الخاص بالأكاديمية.':'يتم الاتصال بملف التسجيل الخاص، باستخدام حساب Google عنده صلاحية على الاستمارات.'}</p></div><button className="wl-primary" type="button" onClick={connectSheet} disabled={!!busy}>{dataReady?'إعادة ربط Google':'ربط استمارات Google'}</button></section>
+   <section className="wl-connect-panel"><div><strong>{dataReady?'متصل باستمارات Techware':'ربط ملف تسجيلات Techware'}</strong><p>{dataReady?'البيانات بتتقرأ من تبويب waiting list في ملف الأكاديمية.':'استخدم حساب Google المصرّح له بالوصول لملف تسجيلات Techware.'}</p><details className="wl-connect-help"><summary>إعدادات الاتصال لو ظهر خطأ 403</summary><p>قد يحتاج مشروع Firebase لتفعيل Google Sheets API مرة واحدة. ده لا يفتح الملف للعامة.</p><a href={sheetsApiSetupUrl} target="_blank" rel="noopener noreferrer">فتح إعدادات Google Sheets API</a></details></div><button className="wl-primary" type="button" onClick={connectSheet} disabled={!!busy}>{busy==='connect'?'جاري الربط...':dataReady?'إعادة ربط Google':'ربط استمارات Google'}</button></section>
    <section className="wl-stats"><div><span>في الانتظار</span><strong>{dataReady?counts.waiting:'—'}</strong><small>آخر 3 شهور</small></div><div><span>حضروا</span><strong>{dataReady?counts.attended:'—'}</strong><small>تم تأكيد حضورهم</small></div><div><span>انتهت المدة</span><strong>{dataReady?counts.expired:'—'}</strong><small>مستبعدون تلقائيًا</small></div><div><span>إجمالي الاستمارات</span><strong>{dataReady?counts.total:'—'}</strong><small>السجل الكامل</small></div></section>
    <section className="wl-panel"><div className="wl-tabs"><button className={tab==='recent'?'selected':''} onClick={()=>{setTab('recent');setStatus('all');}}>قائمة آخر 3 شهور <b>{dataReady?counts.waiting:'—'}</b></button><button className={tab==='all'?'selected':''} onClick={()=>setTab('all')}>القائمة الكاملة <b>{dataReady?counts.total:'—'}</b></button></div>
     <div className="wl-filters"><input aria-label="البحث" value={search} onChange={e=>setSearch(e.target.value)} placeholder="ابحث باسم الطالب أو رقم ولي الأمر..." /><select aria-label="الكورس" value={course} onChange={e=>setCourse(e.target.value)}><option value="all">كل الكورسات</option>{courses.map(c=><option key={c}>{c}</option>)}</select>{tab==='all'&&<select aria-label="الحالة" value={status} onChange={e=>setStatus(e.target.value)}><option value="all">كل الحالات</option>{Object.entries(badges).map(([k,v])=><option value={k} key={k}>{v}</option>)}</select>}</div>
