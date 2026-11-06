@@ -12,6 +12,30 @@ const sourceSpreadsheet='1vZcM6n0eDhDXbi1jNMSpfVWQNLmGBEieqJSgTj_V080';
 const sourceTab="'waiting list'";
 const sheetsEndpoint='https://sheets.googleapis.com/v4/spreadsheets/'+sourceSpreadsheet+'/values/';
 const waitRoot='academyWaitingList/techware';
+// Temporary session storage: same-tab reloads do not require Google authorization again.
+const TOKEN_TTL_MS=45*60*1000;
+const ROWS_TTL_MS=5*60*1000;
+const MANUAL_REFRESH_GAP_MS=60*1000;
+type SavedGrant={uid:string;token:string;expiresAt:number};
+type SavedSnapshot={uid:string;savedAt:number;entries:Entry[];decisions:Record<string,Decision>};
+const grantKey=(uid:string)=>'tw-wait-grant:'+uid;
+const snapshotKey=(uid:string)=>'tw-wait-data:'+uid;
+function readSession<T>(key:string):T|null{try{const value=sessionStorage.getItem(key);return value?JSON.parse(value) as T:null;}catch{return null;}}
+function writeSession(key:string,value:unknown){try{sessionStorage.setItem(key,JSON.stringify(value));}catch{/* Storage may be blocked. */}}
+function removeSession(key:string){try{sessionStorage.removeItem(key);}catch{/* Storage may be blocked. */}}
+function readGrant(uid:string):string{
+ const grant=readSession<SavedGrant>(grantKey(uid));
+ if(grant?.uid===uid&&grant.expiresAt>Date.now())return grant.token;
+ removeSession(grantKey(uid));return '';
+}
+function saveGrant(uid:string,token:string){writeSession(grantKey(uid),{uid,token,expiresAt:Date.now()+TOKEN_TTL_MS} satisfies SavedGrant);}
+function readSnapshot(uid:string):SavedSnapshot|null{
+ const snapshot=readSession<SavedSnapshot>(snapshotKey(uid));
+ if(!snapshot||snapshot.uid!==uid||!Array.isArray(snapshot.entries)||!snapshot.decisions||Date.now()-snapshot.savedAt>ROWS_TTL_MS){removeSession(snapshotKey(uid));return null;}
+ return {...snapshot,entries:snapshot.entries.map(e=>({...e,date:safeDate(e.date)}))};
+}
+function saveSnapshot(uid:string,entries:Entry[],decisions:Record<string,Decision>,savedAt:number){writeSession(snapshotKey(uid),{uid,entries,decisions,savedAt} satisfies SavedSnapshot);}
+
 const choose=(d:DocumentData,keys:string[])=>{for(const k of keys){const value=d[k];if(value!==undefined&&value!==null&&String(value).trim())return String(value).trim();}return '';};
 function safeDate(v:unknown):Date|null{
  if(!v)return null;
@@ -86,13 +110,18 @@ export default function WaitingListApp(){
  const [email,setEmail]=useState(''),[staffUid,setStaffUid]=useState(''),[staffName,setStaffName]=useState('');
  const [staffRows,setStaffRows]=useState<{id:string;name:string;active:boolean}[]>([]);const [staffError,setStaffError]=useState('');
  const [sheetToken,setSheetToken]=useState('');
+ const [lastFetchAt,setLastFetchAt]=useState(0);
  const [dataReady,setDataReady]=useState(false);
  const db=useMemo(()=>getFirestore(firebaseAuth().app),[]);
  useEffect(()=>{const old=document.title;document.title='قائمة الانتظار | Techware Academy';return()=>{document.title=old;};},[]);
- useEffect(()=>onAuthStateChanged(firebaseAuth(),u=>{setUser(u);setAuthReady(true);setRole('checking');},e=>{setAuthReady(true);setError(readable(e));}),[]);
+ useEffect(()=>onAuthStateChanged(firebaseAuth(),u=>{
+  setUser(u);setAuthReady(true);setRole('checking');
+  if(u){setSheetToken(readGrant(u.uid));}
+  else{setSheetToken('');setEntries([]);setDecisions({});setDataReady(false);setLastFetchAt(0);}
+ },e=>{setAuthReady(true);setError(readable(e));}),[]);
  useEffect(()=>{const timer=setInterval(()=>setNow(new Date()),60_000);return()=>clearInterval(timer);},[]);
  useEffect(()=>{
-  if(!user){setRole('checking');setEntries([]);setDecisions({});setSheetToken('');setDataReady(false);return;}
+  if(!user){setRole('checking');return;}
   let cancelled=false;setRole('checking');setError('');
   (async()=>{
    const [portal,legacy,staff]=await Promise.all([
@@ -108,9 +137,19 @@ export default function WaitingListApp(){
  },[user?.uid,db]);
  useEffect(()=>{
   if(!user||!['admin','staff'].includes(role)||!sheetToken)return;
-  let cancelled=false;setLoading(true);setError('');
+  let cancelled=false;
+  // A reload in the same tab uses a verified five-minute snapshot.
+  if(reload===0){
+   const cached=readSnapshot(user.uid);
+   if(cached){
+    setEntries(cached.entries);setDecisions(cached.decisions);setLastSync(new Date(cached.savedAt));
+    setLastFetchAt(cached.savedAt);setDataReady(true);setLoading(false);return;
+   }
+  }
+  setLoading(true);setError('');
   (async()=>{
-   const result=await sheetsRequest(sheetToken,sourceTab+'!A2:L10000');
+   // One Sheets GET per sync, without any background polling.
+   const result=await sheetsRequest(sheetToken,sourceTab+'!A2:L2500');
    if(cancelled)return;
    const rows=(result.values||[]).map((row,i)=>sheetEntry(row,i)).filter((row):row is Entry=>row!==null);
    const flags:Record<string,Decision>={};
@@ -121,10 +160,18 @@ export default function WaitingListApp(){
     if(removed)flags[key]={status:'removed'};
     else if(attended)flags[key]={status:'attended'};
    });
-   setDecisions(flags);setEntries(rows.sort((a,b)=>(b.date?.getTime()||0)-(a.date?.getTime()||0)));
-   setDataReady(true);setLastSync(new Date());setNotice('');
-  })().catch(e=>{if(!cancelled){setError(readable(e));setDataReady(false);}})
-  .finally(()=>{if(!cancelled)setLoading(false);});
+   rows.sort((a,b)=>(b.date?.getTime()||0)-(a.date?.getTime()||0));
+   const stamp=Date.now();
+   setDecisions(flags);setEntries(rows);setDataReady(true);setLastSync(new Date(stamp));
+   setLastFetchAt(stamp);saveSnapshot(user.uid,rows,flags,stamp);
+  })().catch(e=>{
+   if(cancelled)return;
+   setError(readable(e));
+   if((e as Error).message?.includes('انتهت صلاحية')){
+    removeSession(grantKey(user.uid));setSheetToken('');
+   }
+   // A temporary network/API issue does not erase the last loaded list.
+  }).finally(()=>{if(!cancelled)setLoading(false);});
   return()=>{cancelled=true;};
  },[user?.uid,role,sheetToken,reload]);
  useEffect(()=>{
@@ -141,23 +188,50 @@ export default function WaitingListApp(){
   const hay=(e.name+' '+e.phone+' '+e.whatsapp+' '+e.course+' '+e.school).toLowerCase();
   const needle=search.trim().toLowerCase();return (!needle||hay.includes(needle)||canonical(hay).includes(canonical(needle)))&&(course==='all'||e.course===course)&&(status==='all'||classify(e)===status);
  });
+ function refreshData(){
+  if(!sheetToken){setError('لازم تربط Google مرة واحدة علشان تعرض البيانات.');return;}
+  if(loading)return;
+  const elapsed=Date.now()-lastFetchAt;
+  if(dataReady&&elapsed<MANUAL_REFRESH_GAP_MS){
+   setNotice('البيانات محدثة بالفعل. التحديث المتكرر خلال دقيقة مش هيعمل قراءات إضافية.');
+   return;
+  }
+  setNotice('');setReload(n=>n+1);
+ }
+ async function logout(){
+  if(user){removeSession(grantKey(user.uid));removeSession(snapshotKey(user.uid));}
+  setSheetToken('');setDataReady(false);setEntries([]);setDecisions({});
+  await signOut(firebaseAuth());
+ }
  async function connectSheet(){
   if(!user)return;
   setBusy('connect');setError('');
   try{
    const provider=new GoogleAuthProvider();
    provider.addScope('https://www.googleapis.com/auth/spreadsheets');
-   provider.setCustomParameters({prompt:'consent select_account'});
+   // Use the previously granted Google permissions without forcing consent.
    const result=user.providerData.some(p=>p.providerId==='google.com')
      ?await reauthenticateWithPopup(user,provider)
      :await linkWithPopup(user,provider);
    const credential=GoogleAuthProvider.credentialFromResult(result);
    if(!credential?.accessToken)throw Error('لم يتم منح صلاحية Google Sheets. حاول الربط مرة تانية.');
-   setSheetToken(credential.accessToken);setDataReady(false);
+   saveGrant(user.uid,credential.accessToken);
+   setSheetToken(credential.accessToken);setReload(0);setDataReady(false);
   }catch(e){setError(readable(e));}
   finally{setBusy('');}
  }
- async function loginWithGoogle(){setBusy('login');setError('');try{const auth=firebaseAuth();await setPersistence(auth,browserLocalPersistence);await signInWithPopup(auth,new GoogleAuthProvider());}catch(e){setError(readable(e));}finally{setBusy('');}}
+ async function loginWithGoogle(){
+  setBusy('login');setError('');
+  try{
+   const auth=firebaseAuth();await setPersistence(auth,browserLocalPersistence);
+   const provider=new GoogleAuthProvider();
+   provider.addScope('https://www.googleapis.com/auth/spreadsheets');
+   const result=await signInWithPopup(auth,provider);
+   const token=GoogleAuthProvider.credentialFromResult(result)?.accessToken;
+   if(token){saveGrant(result.user.uid,token);setSheetToken(token);}
+  }catch(e){setError(readable(e));}
+  finally{setBusy('');}
+ }
  async function loginWithEmail(e:FormEvent<HTMLFormElement>){e.preventDefault();setBusy('login');setError('');try{const auth=firebaseAuth();await setPersistence(auth,browserLocalPersistence);const pwd=String(new FormData(e.currentTarget).get('password')||'');await signInWithEmailAndPassword(auth,email.trim(),pwd);}catch(e){setError(readable(e));}finally{setBusy('');}}
  async function mark(e:Entry,next:'attended'|'removed'|'waiting'){
   if(!user)return;
@@ -184,8 +258,11 @@ export default function WaitingListApp(){
      const payload=await response.json().catch(()=>({}));
      throw Error(response.status===403?'حساب Google محتاج صلاحية تعديل ملف الاستمارات علشان يحفظ التغيير.':String(payload?.error?.message||'تعذّر حفظ حالة الطالب.'));
     }
-    setDecisions(previous=>({...previous,[e.key]:{status:next}}));
-    setReload(v=>v+1);
+    setDecisions(previous=>{
+     const updated={...previous,[e.key]:{status:next} as Decision};
+     saveSnapshot(user.uid,entries,updated,lastFetchAt||Date.now());
+     return updated;
+    });
    }else{
     await setDoc(doc(db,waitRoot+'/decisions',e.key),{status:next,actorId:user.uid,updatedAt:serverTimestamp()});
    }
@@ -199,10 +276,10 @@ export default function WaitingListApp(){
  async function toggleStaff(row:{id:string;name:string;active:boolean}){if(!user||role!=='admin')return;setBusy(row.id);setError('');try{await setDoc(doc(db,waitRoot+'/staff',row.id),{name:row.name,active:!row.active,updatedAt:serverTimestamp(),createdBy:user.uid});}catch(err){setError(readable(err));}finally{setBusy('');}}
  const badges:Record<string,string>={waiting:'في الانتظار',attended:'حضر',removed:'تم الحذف',expired:'انتهت 3 شهور',undated:'تاريخ غير معروف'};
  return <main className="wl-page" dir="rtl">
-  <header className="wl-header"><div className="wl-brand"><span className="wl-symbol">T</span><div><strong>TECHWARE <span>ACADEMY</span></strong><small>Waiting List Management</small></div></div><div className="wl-header-actions">{user&&<><span className="wl-user">{user.displayName||user.email}</span><button className="wl-out" onClick={()=>signOut(firebaseAuth())}>خروج</button></>}</div></header>
+  <header className="wl-header"><div className="wl-brand"><span className="wl-symbol">T</span><div><strong>TECHWARE <span>ACADEMY</span></strong><small>Waiting List Management</small></div></div><div className="wl-header-actions">{user&&<><span className="wl-user">{user.displayName||user.email}</span><button className="wl-out" onClick={logout}>خروج</button></>}</div></header>
   {!authReady?<section className="wl-center"><div className="wl-loader"/><p>جاري تجهيز الصفحة</p></section>:!user?<section className="wl-auth"><span className="wl-auth-icon">T</span><h1>قائمة انتظار Techware</h1><p>لوحة خاصة بالسكرتارية والإدارة لمتابعة طلبات التسجيل.</p><form onSubmit={loginWithEmail}><label>البريد الإلكتروني<input type="email" dir="ltr" value={email} onChange={e=>setEmail(e.target.value)} placeholder="name@example.com" required/></label><label>كلمة المرور<input type="password" name="password" dir="ltr" placeholder="كلمة المرور" required/></label><button type="submit" className="wl-primary" disabled={!!busy}>تسجيل الدخول</button></form><div className="wl-or">أو</div><button className="wl-google" type="button" onClick={loginWithGoogle} disabled={!!busy}>المتابعة باستخدام Google</button></section>:role==='checking'?<section className="wl-center"><div className="wl-loader"/><p>التحقق من صلاحيات الحساب...</p></section>:role==='denied'?<section className="wl-auth"><h1>الحساب غير مصرح له بالدخول</h1><p>اطلب من الإدارة تفعيل حسابك كموظف سكرتارية.</p><code dir="ltr" className="wl-uid">{user.uid}</code><button className="wl-google" onClick={()=>navigator.clipboard.writeText(user.uid).then(()=>setNotice('تم نسخ UID'))}>نسخ رقم الحساب</button></section>:<div className="wl-content">
-   <section className="wl-heading"><div><span className="wl-overline">لوحة السكرتارية</span><h1>إدارة قائمة الانتظار</h1><p>متابعة طلبات التسجيل والحضور من مكان واحد</p></div><button className="wl-refresh" onClick={()=>setReload(v=>v+1)} disabled={loading}>↻ تحديث البيانات</button></section>
-   <section className="wl-connect-panel"><div><strong>{dataReady?'متصل باستمارات Techware':'ربط ملف تسجيلات Techware'}</strong><p>{dataReady?'البيانات بتتقرأ من تبويب waiting list في ملف الأكاديمية.':'استخدم حساب Google المصرّح له بالوصول لملف تسجيلات Techware.'}</p><details className="wl-connect-help"><summary>إعدادات الاتصال لو ظهر خطأ 403</summary><p>قد يحتاج مشروع Firebase لتفعيل Google Sheets API مرة واحدة. ده لا يفتح الملف للعامة.</p><a href={sheetsApiSetupUrl} target="_blank" rel="noopener noreferrer">فتح إعدادات Google Sheets API</a></details></div><button className="wl-primary" type="button" onClick={connectSheet} disabled={!!busy}>{busy==='connect'?'جاري الربط...':dataReady?'إعادة ربط Google':'ربط استمارات Google'}</button></section>
+   <section className="wl-heading"><div><span className="wl-overline">لوحة السكرتارية</span><h1>إدارة قائمة الانتظار</h1><p>متابعة طلبات التسجيل والحضور من مكان واحد</p></div><button className="wl-refresh" onClick={refreshData} disabled={loading||!sheetToken}>↻ تحديث البيانات</button></section>
+   <section className="wl-connect-panel"><div><strong>{dataReady?'متصل باستمارات Techware':'ربط ملف تسجيلات Techware'}</strong><p>{dataReady?'البيانات بتتقرأ من تبويب waiting list في ملف الأكاديمية.':'استخدم حساب Google المصرّح له بالوصول لملف تسجيلات Techware.'}</p><details className="wl-connect-help"><summary>إعدادات الاتصال لو ظهر خطأ 403</summary><p>قد يحتاج مشروع Firebase لتفعيل Google Sheets API مرة واحدة. ده لا يفتح الملف للعامة.</p><a href={sheetsApiSetupUrl} target="_blank" rel="noopener noreferrer">فتح إعدادات Google Sheets API</a></details></div><button className="wl-primary" type="button" onClick={connectSheet} disabled={!!busy}>{busy==='connect'?'جاري الربط...':sheetToken?'إعادة ربط الحساب':'ربط استمارات Google'}</button></section>
    <section className="wl-stats"><div><span>في الانتظار</span><strong>{dataReady?counts.waiting:'—'}</strong><small>آخر 3 شهور</small></div><div><span>حضروا</span><strong>{dataReady?counts.attended:'—'}</strong><small>تم تأكيد حضورهم</small></div><div><span>انتهت المدة</span><strong>{dataReady?counts.expired:'—'}</strong><small>مستبعدون تلقائيًا</small></div><div><span>إجمالي الاستمارات</span><strong>{dataReady?counts.total:'—'}</strong><small>السجل الكامل</small></div></section>
    <section className="wl-panel"><div className="wl-tabs"><button className={tab==='recent'?'selected':''} onClick={()=>{setTab('recent');setStatus('all');}}>قائمة آخر 3 شهور <b>{dataReady?counts.waiting:'—'}</b></button><button className={tab==='all'?'selected':''} onClick={()=>setTab('all')}>القائمة الكاملة <b>{dataReady?counts.total:'—'}</b></button></div>
     <div className="wl-filters"><input aria-label="البحث" value={search} onChange={e=>setSearch(e.target.value)} placeholder="ابحث باسم الطالب أو رقم ولي الأمر..." /><select aria-label="الكورس" value={course} onChange={e=>setCourse(e.target.value)}><option value="all">كل الكورسات</option>{courses.map(c=><option key={c}>{c}</option>)}</select>{tab==='all'&&<select aria-label="الحالة" value={status} onChange={e=>setStatus(e.target.value)}><option value="all">كل الحالات</option>{Object.entries(badges).map(([k,v])=><option value={k} key={k}>{v}</option>)}</select>}</div>
