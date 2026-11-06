@@ -9,7 +9,7 @@ type Status='waiting'|'attended'|'removed'|'expired'|'undated';
 type Entry={key:string;name:string;phone:string;whatsapp:string;course:string;age:string;date:string;notes:string;school:string;initialStatus:'waiting'|'attended'|'removed'};
 type Decision={status:'waiting'|'attended'|'removed';actorId:string;updatedAt:string};
 type Staff={uid:string;name:string;active:boolean};
-type FullList={ready:boolean;syncedAt:string|null;entries:Entry[];decisions:Record<string,Decision>};
+type FullList={ready:boolean;syncedAt:string|null;entries:Entry[];decisions:Record<string,Decision>;autoSyncConfigured?:boolean};
 type SavedList={uid:string;cachedAt:number;value:FullList};
 type ApiError={error?:string;googleStatus?:number};
 const CACHE_MS=5*60*1000;
@@ -50,6 +50,7 @@ const badges:Record<Status,string>={waiting:'في الانتظار',attended:'ح
 export default function WaitingListApp(){
  const [user,setUser]=useState<User|null>(null),[authReady,setAuthReady]=useState(false);
  const [role,setRole]=useState<Role>('checking');
+ const [autoSync,setAutoSync]=useState(false);
  const [data,setData]=useState<FullList>({ready:false,syncedAt:null,entries:[],decisions:{}});
  const [loading,setLoading]=useState(false),[busy,setBusy]=useState('');
  const [error,setError]=useState(''),[notice,setNotice]=useState('');
@@ -70,6 +71,7 @@ export default function WaitingListApp(){
   (async()=>{
    const me=await api(user,'GET','me');
    if(!alive)return;
+   setAutoSync(me.autoSyncConfigured===true);
    const actualRole=me.role==='admin'?'admin':me.role==='staff'?'staff':'denied';
    setRole(actualRole);
    if(actualRole==='denied')return;
@@ -129,20 +131,24 @@ export default function WaitingListApp(){
   if(!user||role!=='admin')return;
   setBusy('sync');setError('');
   try{
-   const saved=sessionRead<{token:string;expiresAt:number}>(grantKey(user.uid));
-   let googleToken=saved?.expiresAt&&saved.expiresAt>now()?saved.token:'';
-   if(!googleToken){
-    const provider=new GoogleAuthProvider();provider.addScope('https://www.googleapis.com/auth/spreadsheets');
-    const result=user.providerData.some(p=>p.providerId==='google.com')
-      ?await reauthenticateWithPopup(user,provider)
-      :await linkWithPopup(user,provider);
-    googleToken=GoogleAuthProvider.credentialFromResult(result)?.accessToken||'';
-    if(!googleToken)throw Error('لم يتم منح صلاحية استمارات Google.');
-    sessionWrite(grantKey(user.uid),{token:googleToken,expiresAt:now()+GRANT_MS});
+   // With server credentials configured, no popup or admin Google login is needed.
+   let googleToken='';
+   if(!autoSync){
+    const saved=sessionRead<{token:string;expiresAt:number}>(grantKey(user.uid));
+    googleToken=saved?.expiresAt&&saved.expiresAt>now()?saved.token:'';
+    if(!googleToken){
+     const provider=new GoogleAuthProvider();provider.addScope('https://www.googleapis.com/auth/spreadsheets');
+     const result=user.providerData.some(p=>p.providerId==='google.com')
+       ?await reauthenticateWithPopup(user,provider)
+       :await linkWithPopup(user,provider);
+     googleToken=GoogleAuthProvider.credentialFromResult(result)?.accessToken||'';
+     if(!googleToken)throw Error('لم يتم منح صلاحية استمارات Google.');
+     sessionWrite(grantKey(user.uid),{token:googleToken,expiresAt:now()+GRANT_MS});
+    }
    }
-   const outcome=await api(user,'POST','',{action:'sync',token:googleToken});
+   const outcome=await api(user,'POST','',{action:'sync',...(googleToken?{token:googleToken}:{})});
    await loadList(true);
-   setNotice('تمت مزامنة '+String(outcome.count||0)+' استمارة. السكرتارية تقدر تشتغل من غير ربط Google.');
+   setNotice('تمت مزامنة '+String(outcome.count||0)+' استمارة بنجاح.');
   }catch(e){
    const message=(e as Error).message||'تعذرت المزامنة.';
    if(/Google رفض|الصلاحية|انتهت صلاحية/i.test(message))sessionRemove(grantKey(user.uid));
@@ -195,9 +201,9 @@ export default function WaitingListApp(){
    <section className="wl-auth"><h1>الحساب غير مفعّل للسكرتارية</h1><p>ابعت كود الحساب ده للإدارة علشان تفعّله. مش محتاج تربط استمارات Google.</p><code dir="ltr" className="wl-uid">{user.uid}</code><button className="wl-google" onClick={()=>navigator.clipboard.writeText(user.uid).then(()=>setNotice('تم نسخ الكود.'))}>نسخ كود الحساب</button></section>:
   <div className="wl-content">
    <section className="wl-heading"><div><span className="wl-overline">لوحة السكرتارية</span><h1>إدارة قائمة الانتظار</h1><p>التسجيل والحضور من مكان واحد</p></div><button className="wl-refresh" disabled={loading||!!busy} onClick={()=>loadList()}>{loading?'جارٍ التحديث':'↻ تحديث البيانات'}</button></section>
-   {role==='admin'&&<section className="wl-connect-panel"><div><strong>مزامنة الاستمارات (للإدارة فقط)</strong><p>الإدارة بتحدّث البيانات من ملف التسجيل؛ السكرتارية مش محتاجة Google ولا أي خطوات ربط.</p>{data.syncedAt&&<small>آخر مزامنة: {displayTime(data.syncedAt)}</small>}</div><button className="wl-primary" disabled={!!busy} onClick={syncSource}>{busy==='sync'?'جارٍ الربط والمزامنة':'مزامنة مع Google'}</button></section>}
-   {role==='staff'&&<div className="wl-connected-banner"><strong>حساب السكرتارية متصل</strong><span>يمكنك متابعة الطلاب وتسجيل الحضور مباشرة.</span></div>}
-   {!data.ready&&<div className="wl-setup-note">{role==='admin'?'لم تتم المزامنة الأولى بعد. اضغط «مزامنة مع Google» علشان تظهر بيانات الاستمارات للسكرتارية.':'الإدارة لم تنفّذ المزامنة الأولى للاستـمارات بعد. بمجرد تنفيذها هتظهر القائمة هنا تلقائيًا عند التحديث.'}</div>}
+   {role==='admin'&&<section className="wl-connect-panel"><div><strong>{autoSync?'المزامنة التلقائية مفعّلة':'الاتصال التلقائي يحتاج إعدادًا من الإدارة'}</strong><p>{autoSync?'التسجيلات بتتحدث تلقائيًا عند فتح القائمة لو مرّ 15 دقيقة على آخر مزامنة، مع مراجعة يومية مجدولة. السكرتارية مش محتاجة تعمل أي خطوة.':'تم تجهيز التحديث التلقائي، لكنه يحتاج اعتماد خدمة Google مرة واحدة على الخادم. الزر الحالي للإدارة فقط للتحديث اليدوي إلى أن يكتمل الإعداد.'}</p>{data.syncedAt&&<small>آخر مزامنة ناجحة: {displayTime(data.syncedAt)}</small>}</div><button className="wl-primary" disabled={!!busy} onClick={syncSource}>{busy==='sync'?'جارٍ التحديث':'تحديث الآن'}</button></section>}
+   {role==='staff'&&<div className="wl-connected-banner"><strong>حساب السكرتارية متصل</strong><span>الطلبات متاحة مباشرة بدون ربط Google. {autoSync?'المزامنة التلقائية مفعّلة.':'آخر تحديث للطلبات يحدده اتصال الإدارة.'}</span></div>}
+   {!data.ready&&<div className="wl-setup-note">{role==='admin'?'لم تتم المزامنة الأولى بعد. اضغط «تحديث الآن» لعرض السجل، وبعد اعتماد خدمة Google ستعمل المزامنة تلقائيًا.':'الإدارة لم تنفّذ المزامنة الأولى للاستـمارات بعد. بمجرد تنفيذها هتظهر القائمة هنا تلقائيًا عند التحديث.'}</div>}
    <section className="wl-stats"><div><span>في الانتظار</span><strong>{count(waiting.length)}</strong><small>آخر 3 شهور</small></div><div><span>حضروا</span><strong>{count(attended)}</strong><small>تم تأكيد حضورهم</small></div><div><span>انتهت المدة</span><strong>{count(expired)}</strong><small>مستبعدون من القائمة الحديثة</small></div><div><span>إجمالي الاستمارات</span><strong>{count(data.entries.length)}</strong><small>السجل الكامل</small></div></section>
    <section className="wl-panel">
     <div className="wl-tabs"><button className={tab==='recent'?'selected':''} onClick={()=>{setTab('recent');setStatus('all');}}>قائمة آخر 3 شهور <b>{count(waiting.length)}</b></button><button className={tab==='all'?'selected':''} onClick={()=>setTab('all')}>القائمة الكاملة <b>{count(data.entries.length)}</b></button></div>
