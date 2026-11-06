@@ -139,7 +139,7 @@ async function handler(req:Request):Promise<Response>{
   const person=await authorize(req);
   if(req.method==='GET'){
    const kind=new URL(req.url).searchParams.get('kind')||'list';
-   if(kind==='me')return reply({role:person.role});
+   if(kind==='me')return reply({role:person.role,autoSyncConfigured:!!serviceAccount()});
    if(kind==='staff'){
     if(person.role!=='admin')return reply({error:'غير مسموح.'},403);
     const data=await readFile<Record<string,Staff>>('staff',{});
