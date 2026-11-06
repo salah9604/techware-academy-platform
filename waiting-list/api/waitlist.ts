@@ -73,7 +73,9 @@ function normalizeSheetRow(row:string[],index:number):Student|null{
   age:String(row[2]||'').slice(0,30),course:String(row[7]||'غير محدد').slice(0,100),
   notes:String(row[8]||'').slice(0,1000),school:String(row[6]||'').slice(0,160),initialStatus};
 }
-export default async function handler(req:Request):Promise<Response>{
+export async function GET(request:Request):Promise<Response>{return handler(request);}
+export async function POST(request:Request):Promise<Response>{return handler(request);}
+async function handler(req:Request):Promise<Response>{
  try{
   if(!['GET','POST'].includes(req.method))return reply({error:'Method not allowed'},405);
   const person=await authorize(req);
